@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "144193056770",
+    "firebase_url": "https://sline-chat-default-rtdb.firebaseio.com",
+    "project_id": "sline-chat",
+    "storage_bucket": "sline-chat.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:144193056770:android:37396dd4931fbe7f79771b",
+        "android_client_info": {
+          "package_name": "com.example.sline"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDyF5921HWi5_keJdHXcle6iOWMxccCdU0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
