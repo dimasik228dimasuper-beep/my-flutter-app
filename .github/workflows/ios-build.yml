@@ -1156,17 +1156,20 @@ jobs:
             # Xcode всё равно подписывает нативные расширения (OneSignal, FCM).
             # Здесь Xcode вообще не запускается, поэтому единственная сборка —
             # этот xcodebuild, и он же гасит подпись.
+            # XC_TARGET — это bash-массив, чтобы кавычки вокруг пути не попадали
+            # в аргументы xcodebuild (иначе он ищет файл с именем, начинающимся
+            # с апострофа).
             if [ "$USE_SIGNING" != "true" ]; then
               if [ -n "$WORKSPACE" ]; then
-                XC_TARGET="-workspace '$TARGET_PATH'"
+                XC_TARGET=(-workspace "$TARGET_PATH")
               elif [ -n "$PROJECT" ]; then
-                XC_TARGET="-project '$TARGET_PATH'"
+                XC_TARGET=(-project "$TARGET_PATH")
               else
-                XC_TARGET=""
+                XC_TARGET=()
               fi
-              if [ -n "$XC_TARGET" ]; then
+              if [ "${#XC_TARGET[@]}" -gt 0 ]; then
                 echo "Building unsigned via xcodebuild..."
-                xcodebuild $XC_TARGET \
+                xcodebuild "${XC_TARGET[@]}" \
                   -scheme "${SCHEME:-Runner}" \
                   -configuration "$CONFIGURATION" \
                   -destination 'generic/platform=iOS' \
@@ -1183,11 +1186,11 @@ jobs:
               # The Flutter xcconfigs are already written above, so archive
               # the Runner project directly. The IPA step below exports
               # build/App.xcarchive whenever signing is on.
-              ARCHIVE_CMD="xcodebuild"
+              ARCHIVE_CMD=(xcodebuild)
               if [ -n "$WORKSPACE" ]; then
-                ARCHIVE_CMD="$ARCHIVE_CMD -workspace '$TARGET_PATH'"
+                ARCHIVE_CMD+=(-workspace "$TARGET_PATH")
               elif [ -n "$PROJECT" ]; then
-                ARCHIVE_CMD="$ARCHIVE_CMD -project '$TARGET_PATH'"
+                ARCHIVE_CMD+=(-project "$TARGET_PATH")
               else
                 echo "::error::Signing requested but no Runner workspace/project found in '$IOS_PATH'."
                 exit 1
@@ -1196,19 +1199,24 @@ jobs:
               # Flutter wrote the build number into Generated.xcconfig; this
               # only catches a Runner Info.plist that hardcodes it.
               apply_build_number "$TARGET_FLAG" "$TARGET_PATH" -scheme "${SCHEME:-Runner}"
-              ARCHIVE_CMD="$ARCHIVE_CMD -scheme '${SCHEME:-Runner}'"
-              ARCHIVE_CMD="$ARCHIVE_CMD -configuration '$CONFIGURATION'"
-              ARCHIVE_CMD="$ARCHIVE_CMD -destination 'generic/platform=iOS'"
-              ARCHIVE_CMD="$ARCHIVE_CMD -derivedDataPath '$DERIVED_DATA_PATH'"
-              ARCHIVE_CMD="$ARCHIVE_CMD COMPILER_INDEX_STORE_ENABLE=NO $version_settings"
-              ARCHIVE_CMD="$ARCHIVE_CMD -quiet"
-              ARCHIVE_CMD="$ARCHIVE_CMD -archivePath '$GITHUB_WORKSPACE/build/App.xcarchive' archive"
+              ARCHIVE_CMD+=(-scheme "${SCHEME:-Runner}")
+              ARCHIVE_CMD+=(-configuration "$CONFIGURATION")
+              ARCHIVE_CMD+=(-destination 'generic/platform=iOS')
+              ARCHIVE_CMD+=(-derivedDataPath "$DERIVED_DATA_PATH")
+              ARCHIVE_CMD+=(COMPILER_INDEX_STORE_ENABLE=NO)
+              if [ -n "$version_settings" ]; then
+                # shellcheck disable=SC2206
+                ARCHIVE_CMD+=($version_settings)
+              fi
+              ARCHIVE_CMD+=(-quiet)
+              ARCHIVE_CMD+=(-archivePath "$GITHUB_WORKSPACE/build/App.xcarchive")
+              ARCHIVE_CMD+=(archive)
 
               # The manual signing settings go on the Runner target, after
               # the xcconfigs above have been written.
               apply_signing_to_app_target "$PROFILE_BUNDLE_ID"
-              echo "Running: $ARCHIVE_CMD"
-              eval $ARCHIVE_CMD
+              echo "Running: ${ARCHIVE_CMD[*]}"
+              "${ARCHIVE_CMD[@]}"
             fi
           elif [ "$PROJECT_TYPE" = "reactnative" ] || [ "$PROJECT_TYPE" = "expo" ] || [ "$PROJECT_TYPE" = "kmp" ]; then
             # Use xcodebuild directly for React Native/Expo and Kotlin Multiplatform.
@@ -1222,11 +1230,12 @@ jobs:
             else
               echo "Building React Native iOS ($CONFIGURATION)..."
             fi
-            BUILD_CMD="xcodebuild"
+
+            BUILD_CMD=(xcodebuild)
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace '$TARGET_PATH'"
+              BUILD_CMD+=(-workspace "$TARGET_PATH")
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project '$TARGET_PATH'"
+              BUILD_CMD+=(-project "$TARGET_PATH")
             fi
 
             # Auto-detect scheme from workspace/project name (e.g., MyApp.xcworkspace -> MyApp)
@@ -1240,63 +1249,74 @@ jobs:
             fi
 
             apply_build_number "$TARGET_FLAG" "$TARGET_PATH" -scheme "$SCHEME"
-            BUILD_CMD="$BUILD_CMD -scheme '$SCHEME'"
-            BUILD_CMD="$BUILD_CMD -configuration '$CONFIGURATION'"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath '$DERIVED_DATA_PATH'"
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO $version_settings"
-            BUILD_CMD="$BUILD_CMD -quiet"
+            BUILD_CMD+=(-scheme "$SCHEME")
+            BUILD_CMD+=(-configuration "$CONFIGURATION")
+            BUILD_CMD+=(-destination 'generic/platform=iOS')
+            BUILD_CMD+=(-derivedDataPath "$DERIVED_DATA_PATH")
+            BUILD_CMD+=(COMPILER_INDEX_STORE_ENABLE=NO)
+            if [ -n "$version_settings" ]; then
+              # shellcheck disable=SC2206
+              BUILD_CMD+=($version_settings)
+            fi
+            BUILD_CMD+=(-quiet)
 
             if [ "$USE_SIGNING" = "true" ]; then
               # Must archive, not build: the IPA step below exports
               # build/App.xcarchive whenever signing is on. The signing settings
               # go on the app target now that pod install has generated the project.
               apply_signing_to_app_target "$PROFILE_BUNDLE_ID"
-              BUILD_CMD="$BUILD_CMD -archivePath '$GITHUB_WORKSPACE/build/App.xcarchive' archive"
+              BUILD_CMD+=(-archivePath "$GITHUB_WORKSPACE/build/App.xcarchive")
+              BUILD_CMD+=(archive)
             else
-              BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO build"
+              BUILD_CMD+=(CODE_SIGNING_ALLOWED=NO)
+              BUILD_CMD+=(build)
             fi
 
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+            echo "Running: ${BUILD_CMD[*]}"
+            "${BUILD_CMD[@]}"
           else
-            BUILD_CMD="xcodebuild"
+            BUILD_CMD=(xcodebuild)
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace '$TARGET_PATH'"
+              BUILD_CMD+=(-workspace "$TARGET_PATH")
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project '$TARGET_PATH'"
+              BUILD_CMD+=(-project "$TARGET_PATH")
             fi
 
             apply_build_number "$TARGET_FLAG" "$TARGET_PATH" -scheme "$SCHEME"
-            BUILD_CMD="$BUILD_CMD -scheme '$SCHEME'"
-            BUILD_CMD="$BUILD_CMD -configuration '$CONFIGURATION'"
-            BUILD_CMD="$BUILD_CMD -destination 'generic/platform=iOS'"
-            BUILD_CMD="$BUILD_CMD -derivedDataPath '$DERIVED_DATA_PATH'"
-            BUILD_CMD="$BUILD_CMD $version_settings"
+            BUILD_CMD+=(-scheme "$SCHEME")
+            BUILD_CMD+=(-configuration "$CONFIGURATION")
+            BUILD_CMD+=(-destination 'generic/platform=iOS')
+            BUILD_CMD+=(-derivedDataPath "$DERIVED_DATA_PATH")
+            if [ -n "$version_settings" ]; then
+              # shellcheck disable=SC2206
+              BUILD_CMD+=($version_settings)
+            fi
 
             # Speed optimization flags
-            BUILD_CMD="$BUILD_CMD COMPILER_INDEX_STORE_ENABLE=NO"
-            BUILD_CMD="$BUILD_CMD DEBUG_INFORMATION_FORMAT=dwarf"
-            BUILD_CMD="$BUILD_CMD ONLY_ACTIVE_ARCH=YES"
-            BUILD_CMD="$BUILD_CMD -quiet"
+            BUILD_CMD+=(COMPILER_INDEX_STORE_ENABLE=NO)
+            BUILD_CMD+=(DEBUG_INFORMATION_FORMAT=dwarf)
+            BUILD_CMD+=(ONLY_ACTIVE_ARCH=YES)
+            BUILD_CMD+=(-quiet)
 
             # Xcode 16+ native compilation caching
-            BUILD_CMD="$BUILD_CMD SWIFT_ENABLE_COMPILE_CACHE=YES"
-            BUILD_CMD="$BUILD_CMD CLANG_ENABLE_COMPILE_CACHE=YES"
+            BUILD_CMD+=(SWIFT_ENABLE_COMPILE_CACHE=YES)
+            BUILD_CMD+=(CLANG_ENABLE_COMPILE_CACHE=YES)
 
             if [ "$USE_SIGNING" = "true" ]; then
               # For signed builds, use archive. Automatic signing cannot resolve a
               # team on a runner (no Xcode account), so sign the app target
               # manually against the profile installed above.
               apply_signing_to_app_target "$PROFILE_BUNDLE_ID"
-              BUILD_CMD="$BUILD_CMD -archivePath '$GITHUB_WORKSPACE/build/App.xcarchive' archive"
+              BUILD_CMD+=(-archivePath "$GITHUB_WORKSPACE/build/App.xcarchive")
+              BUILD_CMD+=(archive)
             else
               # For unsigned builds, use faster 'build' action
-              BUILD_CMD="$BUILD_CMD CODE_SIGNING_ALLOWED=NO build"
+              BUILD_CMD+=(CODE_SIGNING_ALLOWED=NO)
+              BUILD_CMD+=(build)
             fi
 
-            echo "Running: $BUILD_CMD"
-            eval $BUILD_CMD
+            echo "Running: ${BUILD_CMD[*]}"
+            "${BUILD_CMD[@]}"
           fi
 
           # Create IPA
