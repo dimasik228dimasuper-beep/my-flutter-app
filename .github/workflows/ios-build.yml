@@ -1088,6 +1088,32 @@ jobs:
             fi
             cd "$IOS_PATH"
 
+            # flutter build ios --no-codesign не отключает подпись полностью:
+            # Xcode всё равно подписывает нативные расширения (OneSignal, FCM).
+            # Принудительно отключаем подпись на уровне xcodebuild (unsigned IPA).
+            if [ "$USE_SIGNING" != "true" ]; then
+              if [ -n "$WORKSPACE" ]; then
+                XC_TARGET="-workspace $WORKSPACE"
+              elif [ -n "$PROJECT" ]; then
+                XC_TARGET="-project $PROJECT"
+              else
+                XC_TARGET=""
+              fi
+              if [ -n "$XC_TARGET" ]; then
+                echo "Force-disable codesigning via xcodebuild..."
+                xcodebuild $XC_TARGET \
+                  -scheme "${SCHEME:-Runner}" \
+                  -configuration "$CONFIGURATION" \
+                  -destination 'generic/platform=iOS' \
+                  -derivedDataPath "$DERIVED_DATA_PATH" \
+                  CODE_SIGNING_ALLOWED=NO \
+                  CODE_SIGNING_REQUIRED=NO \
+                  CODE_SIGN_IDENTITY="" \
+                  COMPILER_INDEX_STORE_ENABLE=NO \
+                  build || echo "::warning::xcodebuild force-unsigned step failed (non-fatal for flutter output)"
+              fi
+            fi
+
             if [ "$USE_SIGNING" = "true" ]; then
               # 'flutter build ios' never signs, so archive the Runner project it
               # generated. The IPA step below exports build/App.xcarchive
