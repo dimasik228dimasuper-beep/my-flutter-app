@@ -1008,6 +1008,9 @@ jobs:
           # Navigate to iOS project
           cd "$IOS_PATH"
 
+          echo "Contents of $IOS_PATH:"
+          ls -la
+
           # Find workspace or project
           WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
           PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
@@ -1017,6 +1020,23 @@ jobs:
             echo "Running pod install..."
             pod install
             WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
+          fi
+
+          # Fallback: if neither was found, look for a Flutter Runner project
+          # in the conventional ios/ location (some workflows set ios_path=.).
+          if [ -z "$WORKSPACE" ] && [ -z "$PROJECT" ] && [ -d "ios" ]; then
+            echo "No workspace/project in '$IOS_PATH'; looking in 'ios/'"
+            cd ios
+            WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
+            PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
+          fi
+
+          echo "WORKSPACE=$WORKSPACE"
+          echo "PROJECT=$PROJECT"
+
+          if [ -z "$WORKSPACE" ] && [ -z "$PROJECT" ]; then
+            echo "::error::No .xcworkspace or .xcodeproj found in '$IOS_PATH' or '$IOS_PATH/ios'. Run 'flutter create --platforms=ios .' locally, commit the ios/ directory, and push."
+            exit 1
           fi
 
           if [ -n "$WORKSPACE" ]; then
@@ -1077,11 +1097,10 @@ jobs:
 
             # Generate the Flutter-side xcconfigs without invoking Xcode.
             # `flutter build ios --config-only` is supposed to do exactly this,
-            # but on the Flutter version this workflow runs against it still
-            # resolved SPM and ran an Xcode build, which then demanded a
-            # signing certificate. Writing the two files by hand keeps Xcode
-            # out of the picture until the explicit xcodebuild below, where
-            # CODE_SIGNING_ALLOWED=NO actually applies.
+            # but on some Flutter versions it still resolved SPM and ran an
+            # Xcode build, which then demanded a signing certificate. Writing
+            # the two files by hand keeps Xcode out of the picture until the
+            # explicit xcodebuild below, where CODE_SIGNING_ALLOWED=NO applies.
             apply_build_number
             FLUTTER_ROOT=$(dirname "$(dirname "$(command -v flutter)")")
             APP_DIR="$GITHUB_WORKSPACE"
