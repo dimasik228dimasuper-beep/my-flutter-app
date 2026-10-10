@@ -1007,6 +1007,7 @@ jobs:
 
           # Navigate to iOS project
           cd "$IOS_PATH"
+          IOS_DIR_ABS="$PWD"
 
           echo "Contents of $IOS_PATH:"
           ls -la
@@ -1024,27 +1025,32 @@ jobs:
 
           # Fallback: if neither was found, look for a Flutter Runner project
           # in the conventional ios/ location (some workflows set ios_path=.).
+          # Record the absolute directory so the paths below survive any later
+          # `cd` (the Flutter branch does `cd "$GITHUB_WORKSPACE"` mid-step).
           if [ -z "$WORKSPACE" ] && [ -z "$PROJECT" ] && [ -d "ios" ]; then
             echo "No workspace/project in '$IOS_PATH'; looking in 'ios/'"
             cd ios
+            IOS_DIR_ABS="$PWD"
             WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)
             PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
           fi
 
+          # Absolute paths: xcodebuild runs from various cwds in the branches below.
+          if [ -n "$WORKSPACE" ]; then
+            TARGET_FLAG=-workspace
+            TARGET_PATH="$IOS_DIR_ABS/${WORKSPACE#./}"
+          else
+            TARGET_FLAG=-project
+            TARGET_PATH="$IOS_DIR_ABS/${PROJECT#./}"
+          fi
+
           echo "WORKSPACE=$WORKSPACE"
           echo "PROJECT=$PROJECT"
+          echo "TARGET_PATH=$TARGET_PATH"
 
           if [ -z "$WORKSPACE" ] && [ -z "$PROJECT" ]; then
             echo "::error::No .xcworkspace or .xcodeproj found in '$IOS_PATH' or '$IOS_PATH/ios'. Run 'flutter create --platforms=ios .' locally, commit the ios/ directory, and push."
             exit 1
-          fi
-
-          if [ -n "$WORKSPACE" ]; then
-            TARGET_FLAG=-workspace
-            TARGET_PATH=$WORKSPACE
-          else
-            TARGET_FLAG=-project
-            TARGET_PATH=$PROJECT
           fi
 
           # Determine scheme (only needed for native projects)
@@ -1152,9 +1158,9 @@ jobs:
             # этот xcodebuild, и он же гасит подпись.
             if [ "$USE_SIGNING" != "true" ]; then
               if [ -n "$WORKSPACE" ]; then
-                XC_TARGET="-workspace $WORKSPACE"
+                XC_TARGET="-workspace '$TARGET_PATH'"
               elif [ -n "$PROJECT" ]; then
-                XC_TARGET="-project $PROJECT"
+                XC_TARGET="-project '$TARGET_PATH'"
               else
                 XC_TARGET=""
               fi
@@ -1179,9 +1185,9 @@ jobs:
               # build/App.xcarchive whenever signing is on.
               ARCHIVE_CMD="xcodebuild"
               if [ -n "$WORKSPACE" ]; then
-                ARCHIVE_CMD="$ARCHIVE_CMD -workspace '$WORKSPACE'"
+                ARCHIVE_CMD="$ARCHIVE_CMD -workspace '$TARGET_PATH'"
               elif [ -n "$PROJECT" ]; then
-                ARCHIVE_CMD="$ARCHIVE_CMD -project '$PROJECT'"
+                ARCHIVE_CMD="$ARCHIVE_CMD -project '$TARGET_PATH'"
               else
                 echo "::error::Signing requested but no Runner workspace/project found in '$IOS_PATH'."
                 exit 1
@@ -1218,9 +1224,9 @@ jobs:
             fi
             BUILD_CMD="xcodebuild"
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
+              BUILD_CMD="$BUILD_CMD -workspace '$TARGET_PATH'"
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
+              BUILD_CMD="$BUILD_CMD -project '$TARGET_PATH'"
             fi
 
             # Auto-detect scheme from workspace/project name (e.g., MyApp.xcworkspace -> MyApp)
@@ -1256,9 +1262,9 @@ jobs:
           else
             BUILD_CMD="xcodebuild"
             if [ -n "$WORKSPACE" ]; then
-              BUILD_CMD="$BUILD_CMD -workspace $WORKSPACE"
+              BUILD_CMD="$BUILD_CMD -workspace '$TARGET_PATH'"
             elif [ -n "$PROJECT" ]; then
-              BUILD_CMD="$BUILD_CMD -project $PROJECT"
+              BUILD_CMD="$BUILD_CMD -project '$TARGET_PATH'"
             fi
 
             apply_build_number "$TARGET_FLAG" "$TARGET_PATH" -scheme "$SCHEME"
