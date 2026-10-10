@@ -527,7 +527,8 @@ class SLineGlass extends StatelessWidget {
 /// - капсула едет за пальцем (drag)
 /// - при ведении капсула уже и выше
 /// - spring + haptic
-/// Нижняя панель: liquid_glass_widgets — узкая овальная капсула, без поиска
+/// Нижняя панель: liquid_glass_widgets GlassTabBar (сторонний пакет)
+/// + Positioned(bottom:0) снаружи — чтобы не уезжала вверх
 class _TgIosBottomBar extends StatelessWidget {
   final int index;
   final ValueChanged<int> onChanged;
@@ -551,42 +552,36 @@ class _TgIosBottomBar extends StatelessWidget {
     final mq = MediaQuery.of(context);
     final isTablet = mq.size.shortestSide >= 600;
     final barH = isTablet ? 46.0 : 50.0;
-    final bottomInset = mq.padding.bottom;
-    // Уже по ширине: не на весь экран, по центру
-    final maxW = isTablet ? 420.0 : mq.size.width * 0.92;
-    final sidePad = ((mq.size.width - maxW) / 2).clamp(8.0, 40.0);
+    final maxW = isTablet ? 400.0 : (mq.size.width * 0.92).clamp(280.0, 420.0);
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(sidePad, 0, sidePad, 4),
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
       child: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxW, maxHeight: barH + 6),
-          child: SizedBox(
-            height: barH + 4,
-            width: maxW,
-            child: GlassTabBar.bottom(
-              selectedIndex: index.clamp(0, _items.length - 1),
-              onTabSelected: (i) {
-                HapticFeedback.selectionClick();
-                onChanged(i);
-              },
-              tabs: [
-                for (var i = 0; i < _items.length; i++)
-                  GlassTab(
-                    icon: Icon(_items[i].$1, size: isTablet ? 18 : 20),
-                    label: _items[i].$2,
-                  ),
-              ],
-              barHeight: barH,
-              horizontalPadding: isTablet ? 12 : 4,
-              verticalPadding: 2,
-              showIndicator: true,
-              indicatorPinchStrength: 0.55,
-              selectedIconColor: SLineColors.accentA,
-              unselectedIconColor: const Color(0xFF8E8E93),
-              selectedLabelColor: SLineColors.accentA,
-              unselectedLabelColor: const Color(0xFF8E8E93),
-            ),
+        child: SizedBox(
+          width: maxW,
+          height: barH + 4,
+          child: GlassTabBar.bottom(
+            selectedIndex: index.clamp(0, _items.length - 1),
+            onTabSelected: (i) {
+              HapticFeedback.selectionClick();
+              onChanged(i);
+            },
+            tabs: [
+              for (var i = 0; i < _items.length; i++)
+                GlassTab(
+                  icon: Icon(_items[i].$1, size: isTablet ? 18 : 20),
+                  label: _items[i].$2,
+                ),
+            ],
+            barHeight: barH,
+            horizontalPadding: isTablet ? 12 : 4,
+            verticalPadding: 2,
+            showIndicator: true,
+            indicatorPinchStrength: 0.55,
+            selectedIconColor: SLineColors.accentA,
+            unselectedIconColor: const Color(0xFF8E8E93),
+            selectedLabelColor: SLineColors.accentA,
+            unselectedLabelColor: const Color(0xFF8E8E93),
           ),
         ),
       ),
@@ -1336,20 +1331,36 @@ Future<void> main() async {
     LiquidGlassEngine.liteGlassOnSkia = true;
   } catch (_) {}
   String? initError;
+  // iOS часто уже инициализирует Firebase из GoogleService-Info.plist —
+  // повторный initializeApp даёт [core/duplicate-app].
   try {
-    await Firebase.initializeApp(
-      options: const FirebaseOptions(
-        apiKey: 'AIzaSyDyF5921HWi5_keJdHXcle6iOWMxccCdU0',
-        appId: '1:144193056770:android:37396dd4931fbe7f79771b',
-        messagingSenderId: '144193056770',
-        projectId: 'sline-chat',
-        databaseURL: 'https://sline-chat-default-rtdb.firebaseio.com',
-        storageBucket: 'sline-chat.firebasestorage.app',
-      ),
-    ).timeout(const Duration(seconds: 15),
-        onTimeout: () => throw Exception('Firebase timeout'));
+    if (Firebase.apps.isEmpty) {
+      if (Platform.isIOS) {
+        // Берём конфиг из GoogleService-Info.plist (без android appId)
+        await Firebase.initializeApp().timeout(
+          const Duration(seconds: 15),
+          onTimeout: () => throw Exception('Firebase timeout'),
+        );
+      } else {
+        await Firebase.initializeApp(
+          options: const FirebaseOptions(
+            apiKey: 'AIzaSyDyF5921HWi5_keJdHXcle6iOWMxccCdU0',
+            appId: '1:144193056770:android:37396dd4931fbe7f79771b',
+            messagingSenderId: '144193056770',
+            projectId: 'sline-chat',
+            databaseURL: 'https://sline-chat-default-rtdb.firebaseio.com',
+            storageBucket: 'sline-chat.firebasestorage.app',
+          ),
+        ).timeout(const Duration(seconds: 15),
+            onTimeout: () => throw Exception('Firebase timeout'));
+      }
+    }
   } catch (e) {
-    initError = e.toString();
+    final s = e.toString();
+    // duplicate-app — не ошибка, Firebase уже готов
+    if (!s.contains('duplicate-app') && !s.contains('already exists')) {
+      initError = s;
+    }
   }
   try {
     await initOneSignal();
@@ -2209,6 +2220,7 @@ class Profile {
   final String? avatarUrl;
   final String? bio;
   final bool isSaved;
+  final bool isBot;
   Profile({
     required this.id,
     required this.firstName,
@@ -2219,6 +2231,7 @@ class Profile {
     this.avatarUrl,
     this.bio,
     this.isSaved = false,
+    this.isBot = false,
   });
   String get displayName {
     if (isSaved) return 'Избранное';
@@ -2247,6 +2260,9 @@ class Profile {
     } else if (av.startsWith('//')) {
       av = 'https:$av';
     }
+    final isBot = data['is_bot'] == true ||
+        data['is_bot'] == 1 ||
+        (data['type']?.toString() == 'bot');
     return Profile(
       id: id,
       firstName: (data['first_name'] ?? data['name'] ?? '').toString(),
@@ -2256,6 +2272,7 @@ class Profile {
       color: (data['color'] ?? '#4C7CF3').toString(),
       avatarUrl: av,
       bio: data['bio']?.toString(),
+      isBot: isBot,
     );
   }
 
@@ -5797,12 +5814,13 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            // СТРОГО внизу экрана
-            Align(
-              alignment: Alignment.bottomCenter,
+            // СТРОГО прибито к низу экрана (не к верху Stack)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
               child: SafeArea(
                 top: false,
-                minimum: const EdgeInsets.only(bottom: 4),
                 child: _TgIosBottomBar(
                   index: tab,
                   onChanged: (i) {
@@ -6361,25 +6379,37 @@ class _ChatsPageState extends State<ChatsPage> {
           username: peerId == kSLineSystemUid
               ? 'sline'
               : (peerId.length > 6 ? peerId.substring(0, 6) : peerId));
-      String preview = last.content;
+      String preview = last.content.trim();
+      // Не показывать сырой E2EE JSON в списке
+      if (preview.startsWith('{') &&
+          (preview.contains('"type":"private"') ||
+              preview.contains('"ciphertext"') ||
+              preview.contains('"data":'))) {
+        preview = '🔒 Сообщение';
+      }
       switch (last.type) {
         case 'voice':
           preview = '🎤 Голосовое';
           break;
         case 'circle':
-          preview = '⭕ Кружок';
+          preview = '⭕ Видеосообщение';
           break;
         case 'image':
+        case 'photo':
           preview = '📷 Фото';
           break;
         case 'video':
-          preview = '🎬 Видео';
+          preview = '📹 Видео';
           break;
         case 'gif':
           preview = 'GIF';
           break;
         case 'sticker':
           preview = 'Стикер';
+          break;
+        case 'file':
+        case 'document':
+          preview = '📎 Файл';
           break;
         case 'gift':
           preview = '🎁 ${SLineGifts.labelFor(last.fileUrl)}';
@@ -6389,6 +6419,17 @@ class _ChatsPageState extends State<ChatsPage> {
           break;
         case 'poll':
           preview = '📊 Опрос';
+          break;
+        case 'text':
+        default:
+          if (preview.isEmpty) preview = last.type.isEmpty ? 'Сообщение' : last.type;
+          // убрать reply prefix в превью
+          if (preview.startsWith('↪')) {
+            final nl = preview.indexOf('\n');
+            if (nl > 0 && nl + 1 < preview.length) {
+              preview = preview.substring(nl + 1);
+            }
+          }
           break;
       }
       String kind = 'dm';
@@ -7479,22 +7520,34 @@ class _ChatsPageState extends State<ChatsPage> {
                               ('archive', 'Архив'),
                             ])
                               Padding(
-                                padding: const EdgeInsets.only(right: 6),
-                                child: ChoiceChip(
-                                  label: Text(f.$2,
+                                padding: const EdgeInsets.only(right: 8),
+                                child: GestureDetector(
+                                  onTap: () => setState(() => folder = f.$1),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 180),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 7),
+                                    decoration: BoxDecoration(
+                                      color: folder == f.$1
+                                          ? const Color(0xFF007AFF)
+                                          : (themeCtrl.light
+                                              ? const Color(0xFFF2F2F7)
+                                              : const Color(0xFF2C2C2E)),
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                    child: Text(
+                                      f.$2,
                                       style: TextStyle(
-                                          fontSize: 13,
-                                          color: folder == f.$1
-                                              ? Colors.white
-                                              : themeCtrl.muted)),
-                                  selected: folder == f.$1,
-                                  selectedColor: SLineColors.accentA,
-                                  backgroundColor: themeCtrl.input,
-                                  onSelected: (_) =>
-                                      setState(() => folder = f.$1),
-                                  visualDensity: VisualDensity.compact,
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 8),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                        color: folder == f.$1
+                                            ? Colors.white
+                                            : (themeCtrl.light
+                                                ? const Color(0xFF000000)
+                                                : Colors.white),
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
                           ],
@@ -7629,148 +7682,37 @@ class _ChatsPageState extends State<ChatsPage> {
                             listening.remove(c.chatKey);
                           });
                         },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                          child: Row(children: [
-                            if (selectMode) ...[
-                              AnimatedContainer(
-                                duration: const Duration(milliseconds: 160),
-                                width: 24,
-                                height: 24,
-                                margin: const EdgeInsets.only(right: 12),
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: selected
-                                      ? SLineColors.accentA
-                                      : Colors.transparent,
-                                  border: Border.all(
-                                    color: selected
-                                        ? SLineColors.accentA
-                                        : themeCtrl.muted
-                                            .withValues(alpha: 0.5),
-                                    width: 2,
-                                  ),
-                                ),
-                                child: selected
-                                    ? const Icon(Icons.check,
-                                        size: 14, color: Colors.white)
-                                    : null,
-                              ),
-                            ],
-                            c.kind == 'saved' || c.isSaved
-                                ? Container(
-                                    width: 52,
-                                    height: 52,
-                                    decoration: const BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        gradient: LinearGradient(colors: [
-                                          Color(0xFFF5A623),
-                                          Color(0xFFE67E22)
-                                        ])),
-                                    child: const Icon(Icons.bookmark,
-                                        color: Colors.white))
-                                : c.kind == 'channel'
-                                    ? Container(
-                                        width: 52,
-                                        height: 52,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: peer?.colorValue ??
-                                              const Color(0xFF6D5DF6),
-                                        ),
-                                        child: peer?.avatarUrl != null &&
-                                                peer!.avatarUrl!.isNotEmpty
-                                            ? ClipOval(
-                                                child: SLineNetImage(
-                                                  url: peer.avatarUrl!,
-                                                  width: 52,
-                                                  height: 52,
-                                                  fit: BoxFit.cover,
-                                                ),
-                                              )
-                                            : Center(
-                                                child: Text(
-                                                  () {
-                                                    final n =
-                                                        peer?.displayName ??
-                                                            'К';
-                                                    return n.isEmpty
-                                                        ? 'К'
-                                                        : n[0].toUpperCase();
-                                                  }(),
-                                                  style: const TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 22,
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                                ),
-                                              ),
-                                      )
-                                    // Тап по аватару = открыть чат (не профиль)
-                                    : _Avatar(
-                                        name: peer?.displayName ?? '?',
-                                        color: peer?.colorValue ??
-                                            SLineColors.accentA,
-                                        url: peer?.avatarUrl,
-                                        size: 52,
-                                      ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(children: [
-                                    Expanded(
-                                      child: Text(peer?.displayName ?? 'User',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w600,
-                                              color: themeCtrl.text)),
-                                    ),
-                                    if (c.pinned)
-                                      const Padding(
-                                        padding: EdgeInsets.only(left: 4),
-                                        child: Icon(Icons.push_pin,
-                                            size: 14,
-                                            color: SLineColors.mint),
-                                      ),
-                                    if (c.lastAt > 0)
-                                      Padding(
-                                        padding:
-                                            const EdgeInsets.only(left: 6),
-                                        child: Text(
-                                          () {
-                                            final dt = DateTime
-                                                .fromMillisecondsSinceEpoch(
-                                                    c.lastAt);
-                                            final now = DateTime.now();
-                                            if (dt.year == now.year &&
-                                                dt.month == now.month &&
-                                                dt.day == now.day) {
-                                              return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-                                            }
-                                            return '${dt.day}.${dt.month.toString().padLeft(2, '0')}';
-                                          }(),
-                                          style: TextStyle(
-                                              fontSize: 12,
-                                              color: themeCtrl.muted),
-                                        ),
-                                      ),
-                                  ]),
-                                  const SizedBox(height: 3),
-                                  Text(c.lastMessage,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                          fontSize: 14,
-                                          color: themeCtrl.muted)),
-                                ],
-                              ),
-                            ),
-                          ]),
+                        child: _TgChatListTile(
+                          preview: c,
+                          peer: peer,
+                          selected: selected,
+                          selectMode: selectMode,
+                          muted: mutedKeys.contains(c.chatKey),
+                          pinned: c.pinned,
+                          timeLabel: () {
+                            if (c.lastAt <= 0) return '';
+                            final dt = DateTime.fromMillisecondsSinceEpoch(
+                                c.lastAt);
+                            final now = DateTime.now();
+                            if (dt.year == now.year &&
+                                dt.month == now.month &&
+                                dt.day == now.day) {
+                              final hh = dt.hour.toString().padLeft(2, "0");
+                              final mm = dt.minute.toString().padLeft(2, "0");
+                              return "$hh:$mm";
+                            }
+                            const months = [
+                              '', 'янв', 'фев', 'мар', 'апр', 'мая', 'июн',
+                              'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'
+                            ];
+                            if (now.difference(dt).inDays < 7) {
+                              const days = [
+                                'пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'
+                              ];
+                              return days[dt.weekday - 1];
+                            }
+                            return "${dt.day} ${months[dt.month]}";
+                          }(),
                         ),
                       );
                     },
@@ -8196,6 +8138,8 @@ class _ChatsPageState extends State<ChatsPage> {
   }
 }
 
+}
+
 class _StoryRingLoader extends StatelessWidget {
   final String uid;
   final Profile? peer;
@@ -8258,6 +8202,263 @@ class _StoryRingLoader extends StatelessWidget {
   }
 }
 
+
+
+/// Ячейка чата в стиле Telegram iOS
+class _TgChatListTile extends StatelessWidget {
+  final ChatPreview preview;
+  final Profile? peer;
+  final bool selected;
+  final bool selectMode;
+  final bool muted;
+  final bool pinned;
+  final String timeLabel;
+  const _TgChatListTile({
+    required this.preview,
+    required this.peer,
+    required this.selected,
+    required this.selectMode,
+    required this.muted,
+    required this.pinned,
+    required this.timeLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final name = preview.isSaved
+        ? 'Избранное'
+        : (peer?.displayName ?? 'Chat');
+    final unread = preview.unread;
+    final subtitleColor = isDark
+        ? const Color(0xFF8E8E93)
+        : const Color(0xFF8A8A8E);
+    final nameColor = isDark ? Colors.white : const Color(0xFF000000);
+    final divider = isDark
+        ? const Color(0xFF2C2C2E)
+        : const Color(0xFFE5E5EA);
+    final bg = selected
+        ? (isDark
+            ? const Color(0xFF2C2C2E)
+            : const Color(0xFFE5F1FB))
+        : Colors.transparent;
+
+    return ColoredBox(
+      color: bg,
+      child: Column(
+        children: [
+          SizedBox(
+            height: 76,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  if (selectMode) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 160),
+                        width: 22,
+                        height: 22,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: selected
+                              ? const Color(0xFF007AFF)
+                              : Colors.transparent,
+                          border: Border.all(
+                            color: selected
+                                ? const Color(0xFF007AFF)
+                                : subtitleColor,
+                            width: 1.6,
+                          ),
+                        ),
+                        child: selected
+                            ? const Icon(Icons.check,
+                                size: 14, color: Colors.white)
+                            : null,
+                      ),
+                    ),
+                  ],
+                  _avatar(),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 17,
+                                          fontWeight: FontWeight.w600,
+                                          letterSpacing: -0.2,
+                                          color: nameColor,
+                                        ),
+                                      ),
+                                    ),
+                                    if (preview.kind == 'channel') ...[
+                                      const SizedBox(width: 4),
+                                      Icon(Icons.campaign,
+                                          size: 14, color: subtitleColor),
+                                    ],
+                                    if (preview.kind == 'group') ...[
+                                      const SizedBox(width: 4),
+                                      Icon(Icons.group,
+                                          size: 14, color: subtitleColor),
+                                    ],
+                                    if (muted) ...[
+                                      const SizedBox(width: 4),
+                                      Icon(Icons.volume_off,
+                                          size: 14, color: subtitleColor),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                timeLabel,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: unread > 0
+                                      ? const Color(0xFF007AFF)
+                                      : subtitleColor,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 3),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  preview.lastMessage.isEmpty
+                                      ? 'Нет сообщений'
+                                      : preview.lastMessage,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    height: 1.2,
+                                    color: subtitleColor,
+                                  ),
+                                ),
+                              ),
+                              if (pinned && unread < 1) ...[
+                                const SizedBox(width: 6),
+                                Icon(Icons.push_pin,
+                                    size: 16, color: subtitleColor),
+                              ],
+                              if (unread > 0) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  constraints:
+                                      const BoxConstraints(minWidth: 20),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 7, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: muted
+                                        ? subtitleColor
+                                        : const Color(0xFF007AFF),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    unread > 99 ? '99+' : '$unread',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      height: 1.15,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 76),
+            child: Divider(height: 0.5, thickness: 0.5, color: divider),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _avatar() {
+    const size = 56.0;
+    if (preview.isSaved || preview.kind == 'saved') {
+      return Container(
+        width: size,
+        height: size,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF6EC3F5), Color(0xFF2A9EF0)],
+          ),
+        ),
+        child: const Icon(Icons.bookmark_rounded,
+            color: Colors.white, size: 28),
+      );
+    }
+    final p = peer;
+    final url = p?.avatarUrl;
+    final letter = () {
+      final n = p?.displayName ?? '?';
+      return n.isEmpty ? '?' : n[0].toUpperCase();
+    }();
+    final color = p?.colorValue ?? const Color(0xFF007AFF);
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: color,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            Color.lerp(color, Colors.white, 0.15)!,
+            color,
+          ],
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: url != null && url.isNotEmpty
+          ? SLineNetImage(
+              url: url, width: size, height: size, fit: BoxFit.cover)
+          : Center(
+              child: Text(
+                letter,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+    );
+  }
+}
 
 class _SwipeChatRow extends StatefulWidget {
   final Widget child;
@@ -9923,10 +10124,15 @@ class _ChatScreenState extends State<ChatScreen> {
   ];
 
   @override
+  bool _isBotChat = false;
+  bool _botStarted = true; // non-bots always "started"
+  bool _botStartLoading = false;
+
   void initState() {
     super.initState();
     msgCtrl.addListener(_onComposeChanged);
     _loadDraft();
+    _initBotChat();
     scrollCtrl.addListener(() {
       if (!scrollCtrl.hasClients) return;
       final max = scrollCtrl.position.maxScrollExtent;
@@ -10081,6 +10287,45 @@ class _ChatScreenState extends State<ChatScreen> {
         'created_at_ms': now.millisecondsSinceEpoch,
       };
       await ref.set(payload);
+      // Если пишем боту — inbox для Python API + автоответ команд конструктора
+      if (_isBotChat && type == 'text' && text.trim().isNotEmpty) {
+        try {
+          final botId = widget.peer.id;
+          final updateId = now.millisecondsSinceEpoch;
+          await FirebaseDatabase.instance
+              .ref('bot_inbox/$botId/$updateId')
+              .set({
+            'update_id': updateId,
+            'message_id': ref.key,
+            'from_id': widget.user.uid,
+            'from_name': widget.myProfile?.displayName ?? 'User',
+            'text': text.trim(),
+            'created_at_ms': updateId,
+          });
+          // visual commands
+          final raw = text.trim();
+          if (raw.startsWith('/')) {
+            final cmd = raw.split(RegExp(r'\s+')).first.substring(1).toLowerCase();
+            final cmdSnap = await FirebaseDatabase.instance
+                .ref('bots/$botId/commands/$cmd')
+                .get();
+            if (cmdSnap.exists && cmdSnap.value != null) {
+              final reply = cmdSnap.value.toString();
+              final rid = chatMsgsRef(widget.chatKey).push();
+              await rid.set({
+                'id': rid.key,
+                'sender_id': botId,
+                'receiver_id': widget.user.uid,
+                'content': reply,
+                'type': 'text',
+                'created_at': now.toIso8601String(),
+                'created_at_ms': now.millisecondsSinceEpoch + 1,
+                'from_bot': true,
+              });
+            }
+          }
+        } catch (_) {}
+      }
       // дубль для веб-таблицы messages (нужен для появления чата у собеседника)
       try {
         await FirebaseDatabase.instance
@@ -11676,7 +11921,9 @@ class _ChatScreenState extends State<ChatScreen> {
               left: 0,
               right: 0,
               bottom: 0,
-              child: _buildComposerBar(),
+              child: (_isBotChat && !_botStarted)
+                  ? _buildBotStartBar()
+                  : _buildComposerBar(),
             ),
           ], // Expanded Stack children
         ), // Expanded Stack
@@ -11689,6 +11936,132 @@ class _ChatScreenState extends State<ChatScreen> {
     ), // Material
       ), // Transform.translate
     ); // GestureDetector
+  }
+
+
+  Future<void> _initBotChat() async {
+    final p = widget.peer;
+    final isBot = p.isBot ||
+        p.username.toLowerCase().endsWith('bot') ||
+        widget.chatKey.contains('bot');
+    if (!isBot) {
+      if (mounted) setState(() {
+        _isBotChat = false;
+        _botStarted = true;
+      });
+      return;
+    }
+    // double-check bots table
+    try {
+      final snap =
+          await FirebaseDatabase.instance.ref('bots/${p.id}').get();
+      if (!snap.exists) {
+        // username ends with bot but not a real bot record
+        if (mounted) setState(() {
+          _isBotChat = p.isBot;
+          _botStarted = !p.isBot;
+        });
+        if (!p.isBot) return;
+      } else {
+        if (mounted) setState(() => _isBotChat = true);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isBotChat = p.isBot);
+    }
+    if (!_isBotChat && !p.isBot) return;
+    if (mounted) setState(() => _isBotChat = true);
+    try {
+      final st = await FirebaseDatabase.instance
+          .ref('bot_users/${p.id}/${widget.user.uid}')
+          .get();
+      final started = st.exists &&
+          (st.value is Map
+              ? (st.value as Map)['started'] == true
+              : st.value == true);
+      if (mounted) setState(() => _botStarted = started);
+    } catch (_) {
+      if (mounted) setState(() => _botStarted = false);
+    }
+  }
+
+  Future<void> _startBot() async {
+    if (_botStartLoading) return;
+    setState(() => _botStartLoading = true);
+    try {
+      final botId = widget.peer.id;
+      final now = DateTime.now().toUtc().toIso8601String();
+      await FirebaseDatabase.instance
+          .ref('bot_users/$botId/${widget.user.uid}')
+          .set({'started': true, 'at': now});
+      // index chat
+      final key = widget.chatKey;
+      await FirebaseDatabase.instance
+          .ref('user_chat_index/${widget.user.uid}/$key')
+          .update({
+        'peer_id': botId,
+        'type': 'bot',
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      });
+      // auto /start reply from visual commands
+      try {
+        final cmdSnap = await FirebaseDatabase.instance
+            .ref('bots/$botId/commands/start')
+            .get();
+        final text = cmdSnap.exists
+            ? cmdSnap.value.toString()
+            : 'Бот запущен. Напишите сообщение.';
+        final msgId = 'bot${DateTime.now().millisecondsSinceEpoch}';
+        await chatMsgsRef(key).child(msgId).set({
+          'sender_id': botId,
+          'receiver_id': widget.user.uid,
+          'type': 'text',
+          'text': text,
+          'created_at': now,
+          'created_at_ms': DateTime.now().millisecondsSinceEpoch,
+          'from_bot': true,
+        });
+      } catch (_) {}
+      if (mounted) setState(() => _botStarted = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Не удалось: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _botStartLoading = false);
+    }
+  }
+
+  Widget _buildBotStartBar() {
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: SizedBox(
+          width: double.infinity,
+          height: 48,
+          child: FilledButton(
+            onPressed: _botStartLoading ? null : _startBot,
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF2AABEE),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            child: _botStartLoading
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white))
+                : const Text('START',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.2,
+                        fontSize: 16)),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildComposerBar() {
@@ -17282,6 +17655,472 @@ class AppearancePage extends StatelessWidget {
 
 // ── channel / group ──
 
+// ═══════════════════════════════════════════════════════════════
+// SLine Bots (как @BotFather + API как Telegram)
+// ═══════════════════════════════════════════════════════════════
+
+String generateSlineBotToken(String botId) {
+  final rnd = List<int>.generate(24, (_) => math.Random.secure().nextInt(256));
+  final secret = base64Url.encode(rnd).replaceAll('=', '');
+  return '$botId:$secret';
+}
+
+class CreateBotPage extends StatefulWidget {
+  final User user;
+  final Profile? myProfile;
+  const CreateBotPage({super.key, required this.user, this.myProfile});
+  @override
+  State<CreateBotPage> createState() => _CreateBotPageState();
+}
+
+class _CreateBotPageState extends State<CreateBotPage> {
+  final nameC = TextEditingController();
+  final userC = TextEditingController();
+  final descC = TextEditingController();
+  String? avatarUrl;
+  bool loading = false;
+
+  @override
+  void dispose() {
+    nameC.dispose();
+    userC.dispose();
+    descC.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickAvatar() async {
+    final x = await ImagePicker()
+        .pickImage(source: ImageSource.gallery, imageQuality: 85);
+    if (x == null) return;
+    setState(() => loading = true);
+    try {
+      final url = await B2Storage.uploadFile(
+          File(x.path), 'bot_avatars', widget.user.uid);
+      if (mounted) setState(() => avatarUrl = url);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> _create() async {
+    final name = nameC.text.trim();
+    var uname = userC.text.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Введите имя бота')));
+      return;
+    }
+    if (!uname.endsWith('bot')) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Username должен оканчиваться на «bot» (например mybot)')));
+      return;
+    }
+    if (uname.length < 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Username слишком короткий')));
+      return;
+    }
+    if (await isUsernameTaken(uname) || await isSlugTaken(uname)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Такой @username уже занят')));
+      return;
+    }
+    setState(() => loading = true);
+    try {
+      final botRef = FirebaseDatabase.instance.ref('bots').push();
+      final botId = botRef.key!;
+      final token = generateSlineBotToken(botId);
+      final now = DateTime.now().toUtc().toIso8601String();
+      await botRef.set({
+        'owner_id': widget.user.uid,
+        'name': name,
+        'username': uname,
+        'avatar_url': avatarUrl,
+        'description': descC.text.trim(),
+        'token': token,
+        'created_at': now,
+        'commands': {
+          'start': 'Привет! Я $name. Напишите /help',
+          'help': 'Команды: /start, /help',
+        },
+      });
+      await profilesRef().child(botId).set({
+        'first_name': name,
+        'username': uname,
+        'avatar_url': avatarUrl,
+        'bio': descC.text.trim(),
+        'is_bot': true,
+        'owner_id': widget.user.uid,
+        'created_at': now,
+        'color': '#2AABEE',
+      });
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => BotTokenPage(
+          user: widget.user,
+          botId: botId,
+          botName: name,
+          username: uname,
+          token: token,
+        ),
+      ));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: themeCtrl.bg,
+      appBar: AppBar(title: const Text('Новый бот')),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
+                Center(
+                  child: GestureDetector(
+                    onTap: _pickAvatar,
+                    child: CircleAvatar(
+                      radius: 48,
+                      backgroundColor: SLineColors.accentA.withValues(alpha: 0.15),
+                      backgroundImage:
+                          avatarUrl != null ? NetworkImage(avatarUrl!) : null,
+                      child: avatarUrl == null
+                          ? const Icon(Icons.android, size: 40,
+                              color: SLineColors.accentA)
+                          : null,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Center(
+                    child: Text('Нажмите, чтобы поставить аватарку',
+                        style: TextStyle(fontSize: 12, color: Colors.grey))),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: nameC,
+                  decoration: const InputDecoration(
+                    labelText: 'Имя бота',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: userC,
+                  decoration: const InputDecoration(
+                    labelText: 'Username (обязан оканчиваться на bot)',
+                    prefixText: '@',
+                    border: OutlineInputBorder(),
+                    helperText: 'Например: weather_bot, helperbot',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: descC,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Описание (необязательно)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: _create,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                    backgroundColor: SLineColors.accentA,
+                  ),
+                  child: const Text('Создать бота'),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+class BotTokenPage extends StatelessWidget {
+  final User user;
+  final String botId;
+  final String botName;
+  final String username;
+  final String token;
+  const BotTokenPage({
+    super.key,
+    required this.user,
+    required this.botId,
+    required this.botName,
+    required this.username,
+    required this.token,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final proxy = 'https://old-band-f00b.dimasik-228-dima-super.workers.dev';
+    return Scaffold(
+      backgroundColor: themeCtrl.bg,
+      appBar: AppBar(title: const Text('Токен бота')),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          const Icon(Icons.verified_user, size: 56, color: Color(0xFF2AABEE)),
+          const SizedBox(height: 12),
+          Text('Бот @$username создан!',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text(botName,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: themeCtrl.text.withValues(alpha: 0.6))),
+          const SizedBox(height: 20),
+          const Text(
+            'Это токен — пароль бота. Храните в секретах как SLINE_BOT_API.\n'
+            'Никому не показывайте (кроме своих скриптов).',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: themeCtrl.light ? const Color(0xFFF0F2F5) : const Color(0xFF1C1C1E),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: SelectableText(token,
+                style: const TextStyle(
+                    fontFamily: 'monospace', fontSize: 13, height: 1.35)),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: token));
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Токен скопирован')));
+              }
+            },
+            icon: const Icon(Icons.copy),
+            label: const Text('Копировать токен'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () async {
+              final line = 'SLINE_BOT_API=$token';
+              await Clipboard.setData(ClipboardData(text: line));
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('SLINE_BOT_API=... скопировано')));
+              }
+            },
+            icon: const Icon(Icons.key),
+            label: const Text('Копировать SLINE_BOT_API=...'),
+          ),
+          const SizedBox(height: 24),
+          const Text('Python (пример)',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0D1117),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: SelectableText(
+              'import os, requests\n'
+              'TOKEN = os.environ["SLINE_BOT_API"]  # $token\n'
+              'API = "$proxy/bot" + TOKEN\n\n'
+              'r = requests.get(API + "/getMe")\n'
+              'print(r.json())\n\n'
+              '# отправить сообщение пользователю (после /start):\n'
+              '# requests.post(API + "/sendMessage", json={\n'
+              '#   "chat_id": "<user_uid>",\n'
+              '#   "text": "Привет из SLine-бота!"\n'
+              '# })',
+              style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  color: Color(0xFF7EE787),
+                  height: 1.4),
+            ),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => BotVisualBuilderPage(
+                    user: user, botId: botId, botName: botName),
+              ));
+            },
+            icon: const Icon(Icons.widgets_outlined),
+            label: const Text('Визуальное создание (как ManyBot)'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+              backgroundColor: SLineColors.accentA,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Готово'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class BotVisualBuilderPage extends StatefulWidget {
+  final User user;
+  final String botId;
+  final String botName;
+  const BotVisualBuilderPage(
+      {super.key, required this.user, required this.botId, required this.botName});
+  @override
+  State<BotVisualBuilderPage> createState() => _BotVisualBuilderPageState();
+}
+
+class _BotVisualBuilderPageState extends State<BotVisualBuilderPage> {
+  final startC = TextEditingController(text: 'Привет! Нажмите меню или напишите /help');
+  final helpC = TextEditingController(text: 'Доступные команды: /start, /help');
+  final customCmd = TextEditingController();
+  final customReply = TextEditingController();
+  Map<String, String> commands = {};
+  bool loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final snap =
+          await FirebaseDatabase.instance.ref('bots/${widget.botId}/commands').get();
+      if (snap.exists && snap.value is Map) {
+        final m = Map<String, dynamic>.from(snap.value as Map);
+        commands = m.map((k, v) => MapEntry(k.toString(), v.toString()));
+        startC.text = commands['start'] ?? startC.text;
+        helpC.text = commands['help'] ?? helpC.text;
+        if (mounted) setState(() {});
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _save() async {
+    setState(() => loading = true);
+    try {
+      final map = Map<String, String>.from(commands);
+      map['start'] = startC.text.trim();
+      map['help'] = helpC.text.trim();
+      if (customCmd.text.trim().isNotEmpty) {
+        var c = customCmd.text.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
+        if (c.startsWith('/')) c = c.substring(1);
+        if (c.isNotEmpty) map[c] = customReply.text.trim();
+      }
+      await FirebaseDatabase.instance.ref('bots/${widget.botId}/commands').set(map);
+      if (mounted) {
+        setState(() => commands = map);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Команды сохранены')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: themeCtrl.bg,
+      appBar: AppBar(title: Text('Конструктор: ${widget.botName}')),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                const Text('Ответы на команды (без кода)',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: startC,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: '/start',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: helpC,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: '/help',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text('Своя команда',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: customCmd,
+                  decoration: const InputDecoration(
+                    labelText: 'Команда (например: weather)',
+                    prefixText: '/',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: customReply,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Ответ бота',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                if (commands.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  const Text('Уже задано:', style: TextStyle(fontWeight: FontWeight.w600)),
+                  ...commands.entries.map((e) => ListTile(
+                        dense: true,
+                        title: Text('/${e.key}'),
+                        subtitle: Text(e.value, maxLines: 2),
+                      )),
+                ],
+                const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: _save,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                    backgroundColor: SLineColors.accentA,
+                  ),
+                  child: const Text('Сохранить'),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+
 class CreateChannelPage extends StatefulWidget {
   final User user;
   final Profile? myProfile;
@@ -19755,10 +20594,11 @@ class _StartChatPageState extends State<StartChatPage> {
                         user: widget.user, myProfile: widget.myProfile),
                   ));
                 }),
-                _action(Icons.smart_toy_outlined, 'Создать бота', () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Боты — в разработке')),
-                  );
+                _action(Icons.android, 'Создать бота', () {
+                  Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => CreateBotPage(
+                        user: widget.user, myProfile: widget.myProfile),
+                  ));
                 }),
                 _action(Icons.search, 'Найти бота по @username', () {
                   FocusScope.of(context).requestFocus(FocusNode());

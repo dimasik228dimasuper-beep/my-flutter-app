@@ -1,6 +1,10 @@
 import Flutter
 import UIKit
 
+import FirebaseCore
+import FirebaseMessaging
+import UserNotifications
+
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   override func application(
