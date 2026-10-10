@@ -42,6 +42,7 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^5.0.0
   flutter_launcher_icons: ^0.14.3
+  flutter_ios_capabilities_setup: ^0.2.2
 
 dependency_overrides:
   camera_android_camerax: 0.7.4+6
