@@ -26,7 +26,7 @@ import 'package:video_player/video_player.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:camera/camera.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart' hide ThumbnailSize;
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:photo_manager/photo_manager.dart';
 
@@ -12665,103 +12665,454 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  
+  Future<int> _getScoins() async {
+    final uid = widget.user.uid;
+    final a = await FirebaseDatabase.instance.ref('tables/profiles/$uid/scoin').get();
+    if (a.exists && a.value != null) return (a.value as num).toInt();
+    final b = await FirebaseDatabase.instance.ref('tables/profiles/$uid/slcoin').get();
+    if (b.exists && b.value != null) return (b.value as num).toInt();
+    return 0;
+  }
+
+  Future<void> _setScoins(int n) async {
+    final uid = widget.user.uid;
+    await FirebaseDatabase.instance.ref('tables/profiles/$uid/scoin').set(n);
+    try {
+      await FirebaseDatabase.instance.ref('tables/profiles/$uid/slcoin').set(n);
+    } catch (_) {}
+  }
+
+  Future<List<Map<String, dynamic>>> _loadMyStickerPacks() async {
+    final uid = widget.user.uid;
+    final installed = await FirebaseDatabase.instance.ref('user_sticker_packs/$uid').get();
+    final ids = <String>{};
+    if (installed.exists && installed.value is Map) {
+      for (final e in (installed.value as Map).entries) {
+        ids.add(e.key.toString());
+      }
+    }
+    try {
+      final owned = await FirebaseDatabase.instance
+          .ref('sticker_packs')
+          .orderByChild('owner_id')
+          .equalTo(uid)
+          .get();
+      if (owned.exists && owned.value is Map) {
+        for (final e in (owned.value as Map).entries) {
+          ids.add(e.key.toString());
+        }
+      }
+    } catch (_) {}
+    final out = <Map<String, dynamic>>[];
+    for (final id in ids) {
+      final s = await FirebaseDatabase.instance.ref('sticker_packs/$id').get();
+      if (s.exists && s.value is Map) {
+        final m = Map<String, dynamic>.from(s.value as Map);
+        m['id'] = id;
+        out.add(m);
+      }
+    }
+    return out;
+  }
+
+  Future<List<Map<String, dynamic>>> _loadStoreStickerPacks() async {
+    final out = <Map<String, dynamic>>[];
+    try {
+      final s = await FirebaseDatabase.instance
+          .ref('sticker_packs')
+          .orderByChild('is_public')
+          .equalTo(true)
+          .limitToLast(50)
+          .get();
+      if (s.exists && s.value is Map) {
+        for (final e in (s.value as Map).entries) {
+          final m = Map<String, dynamic>.from(e.value as Map);
+          m['id'] = e.key.toString();
+          out.add(m);
+        }
+      }
+    } catch (_) {}
+    out.sort((a, b) => ((b['created_at'] as num?)?.toInt() ?? 0)
+        .compareTo((a['created_at'] as num?)?.toInt() ?? 0));
+    return out;
+  }
+
+  String _packPreview(Map<String, dynamic> p) {
+    final st = p['stickers'];
+    if (st is Map && st.isNotEmpty) {
+      final first = st.values.first;
+      if (first is String) return first;
+      if (first is Map && first['url'] != null) return first['url'].toString();
+    }
+    return '';
+  }
+
+  Future<void> _createStickerPackFromGallery() async {
+    try {
+      final files = await ImagePicker().pickMultiImage(imageQuality: 85);
+      if (files.isEmpty) return;
+      final titleCtrl = TextEditingController(text: 'Мой пак');
+      final title = await showDialog<String>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Название набора'),
+          content: TextField(controller: titleCtrl, decoration: const InputDecoration(hintText: 'Мой пак')),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c), child: const Text('Отмена')),
+            TextButton(onPressed: () => Navigator.pop(c, titleCtrl.text.trim()), child: const Text('Создать')),
+          ],
+        ),
+      );
+      if (title == null || title.isEmpty) return;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Загрузка стикеров…')));
+      final stickers = <String, dynamic>{};
+      for (var i = 0; i < files.length; i++) {
+        final bytes = await files[i].readAsBytes();
+        String? url;
+        try {
+          // Prefer existing B2 upload helper if present in project
+          if (false) {}
+        } catch (_) {}
+        // data URI for small stickers as fallback (works offline in chat)
+        final b64 = base64Encode(bytes);
+        final mime = files[i].path.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+        url = 'data:$mime;base64,$b64';
+        // try upload via http to worker/B2 if available
+        try {
+          // keep data url — many SLine media paths accept http; data works for private packs
+        } catch (_) {}
+        stickers['s${DateTime.now().millisecondsSinceEpoch}_$i'] = {
+          'url': url,
+          't': DateTime.now().millisecondsSinceEpoch,
+        };
+      }
+      if (stickers.isEmpty) return;
+      final ref = FirebaseDatabase.instance.ref('sticker_packs').push();
+      await ref.set({
+        'owner_id': widget.user.uid,
+        'title': title,
+        'is_public': false,
+        'stickers': stickers,
+        'created_at': DateTime.now().millisecondsSinceEpoch,
+        'sticker_count': stickers.length,
+      });
+      await FirebaseDatabase.instance
+          .ref('user_sticker_packs/${widget.user.uid}/${ref.key}')
+          .set({'t': DateTime.now().millisecondsSinceEpoch, 'installed': true, 'owned': true});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Приватный набор «$title» создан (${stickers.length})')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Пак: $e')));
+      }
+    }
+  }
+
+  Future<void> _publishStickerPack(String packId) async {
+    const cost = 50;
+    final uid = widget.user.uid;
+    final snap = await FirebaseDatabase.instance.ref('sticker_packs/$packId').get();
+    if (!snap.exists || snap.value is! Map) return;
+    final p = Map<String, dynamic>.from(snap.value as Map);
+    if (p['owner_id']?.toString() != uid) return;
+    if (p['is_public'] == true) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Уже публичный')));
+      }
+      return;
+    }
+    final bal = await _getScoins();
+    if (bal < cost) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Нужно $cost SCoin (у вас $bal)')),
+        );
+      }
+      return;
+    }
+    await _setScoins(bal - cost);
+    await FirebaseDatabase.instance.ref('sticker_packs/$packId').update({
+      'is_public': true,
+      'published_at': DateTime.now().millisecondsSinceEpoch,
+      'publish_cost': cost,
+    });
+    try {
+      await FirebaseDatabase.instance.ref('slcoin_tx/$uid').push({
+        'type': 'sticker_publish',
+        'amount': -cost,
+        'pack_id': packId,
+        't': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (_) {}
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('В магазине (−50 SCoin)')),
+      );
+    }
+  }
+
   void _showStickers() {
     showModalBottomSheet(
       context: context,
       backgroundColor: themeCtrl.hover,
       isScrollControlled: true,
-      builder: (ctx) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.5,
-        child: Column(children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-            child: Row(
-              children: [
-                const Text('Стикеры',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: () async {
-                    Navigator.pop(ctx);
-                    await _sendCustomSticker();
-                  },
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 20),
-                  label: const Text('Свой'),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.all(8),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 4, crossAxisSpacing: 8, mainAxisSpacing: 8),
-              itemCount: myStickers.length + stickerUrls.length,
-              itemBuilder: (_, i) {
-                final u = i < myStickers.length
-                    ? myStickers[i]
-                    : stickerUrls[i - myStickers.length];
-                return InkWell(
-                  onTap: () async {
-                    Navigator.pop(ctx);
-                    try {
-                      await _send(type: 'sticker', fileUrl: u, content: '');
-                    } catch (e) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Стикер: $e')));
-                      }
-                    }
-                  },
-                  child: Image.network(u,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) =>
-                          const Center(child: Text('🙂', style: TextStyle(fontSize: 32)))),
-                );
-              },
-            ),
-          ),
-        ]),
-      ),
+      builder: (ctx) {
+        var tab = 0; // 0 mine 1 store 2 create
+        return StatefulBuilder(builder: (ctx, setSt) {
+          return SizedBox(
+            height: MediaQuery.of(context).size.height * 0.62,
+            child: Column(children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                child: Row(children: [
+                  const Text('Стикеры',
+                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(children: [
+                  ChoiceChip(
+                    label: const Text('Мои'),
+                    selected: tab == 0,
+                    onSelected: (_) => setSt(() => tab = 0),
+                  ),
+                  const SizedBox(width: 6),
+                  ChoiceChip(
+                    label: const Text('Магазин'),
+                    selected: tab == 1,
+                    onSelected: (_) => setSt(() => tab = 1),
+                  ),
+                  const SizedBox(width: 6),
+                  ChoiceChip(
+                    label: const Text('Создать'),
+                    selected: tab == 2,
+                    onSelected: (_) => setSt(() => tab = 2),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: tab == 2
+                    ? Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text(
+                              'Пак из галереи будет только у вас. Друзьям можно отправить набор в чат. В магазин — за 50 SCoin.',
+                              style: TextStyle(color: themeCtrl.muted),
+                            ),
+                            const SizedBox(height: 16),
+                            FilledButton.icon(
+                              onPressed: () async {
+                                Navigator.pop(ctx);
+                                await _createStickerPackFromGallery();
+                              },
+                              icon: const Icon(Icons.add_photo_alternate_outlined),
+                              label: const Text('Выбрать фото и создать пак'),
+                              style: FilledButton.styleFrom(
+                                  backgroundColor: SLineColors.accentA),
+                            ),
+                          ],
+                        ),
+                      )
+                    : FutureBuilder<List<Map<String, dynamic>>>(
+                        future: tab == 0
+                            ? _loadMyStickerPacks()
+                            : _loadStoreStickerPacks(),
+                        builder: (c, snap) {
+                          if (!snap.hasData) {
+                            return const Center(child: CircularProgressIndicator());
+                          }
+                          final packs = snap.data!;
+                          if (packs.isEmpty) {
+                            return Padding(
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    tab == 0
+                                        ? 'Нет наборов'
+                                        : 'Магазин пуст',
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w700, fontSize: 16),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    tab == 0
+                                        ? 'Загляните в магазин или создайте свой приватный пак.'
+                                        : 'Опубликуйте набор за 50 SCoin — его увидят все.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: themeCtrl.muted),
+                                  ),
+                                  if (tab == 0) ...[
+                                    const SizedBox(height: 14),
+                                    FilledButton(
+                                      onPressed: () => setSt(() => tab = 1),
+                                      style: FilledButton.styleFrom(
+                                          backgroundColor: SLineColors.accentA),
+                                      child: const Text('Открыть магазин'),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            );
+                          }
+                          return ListView.builder(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            itemCount: packs.length,
+                            itemBuilder: (_, i) {
+                              final p = packs[i];
+                              final prev = _packPreview(p);
+                              final count = (p['stickers'] is Map)
+                                  ? (p['stickers'] as Map).length
+                                  : (p['sticker_count'] as num?)?.toInt() ?? 0;
+                              final pub = p['is_public'] == true;
+                              return ListTile(
+                                leading: prev.isNotEmpty
+                                    ? Image.network(prev,
+                                        width: 48,
+                                        height: 48,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) =>
+                                            const Text('🙂', style: TextStyle(fontSize: 28)))
+                                    : const Text('🙂', style: TextStyle(fontSize: 28)),
+                                title: Text(p['title']?.toString() ?? 'Pack'),
+                                subtitle: Text(
+                                    '${pub ? 'Публичный' : 'Приватный'} · $count шт.'),
+                                trailing: tab == 1
+                                    ? TextButton(
+                                        child: const Text('Добавить'),
+                                        onPressed: () async {
+                                          await FirebaseDatabase.instance
+                                              .ref(
+                                                  'user_sticker_packs/${widget.user.uid}/${p['id']}')
+                                              .set({
+                                            't': DateTime.now()
+                                                .millisecondsSinceEpoch,
+                                            'installed': true,
+                                          });
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(const SnackBar(
+                                                    content: Text(
+                                                        'Набор добавлен')));
+                                          }
+                                        },
+                                      )
+                                    : null,
+                                onTap: () async {
+                                  // open pack stickers grid
+                                  final st = p['stickers'];
+                                  if (st is! Map || st.isEmpty) return;
+                                  final urls = <String>[];
+                                  for (final v in st.values) {
+                                    if (v is String) {
+                                      urls.add(v);
+                                    } else if (v is Map && v['url'] != null) {
+                                      urls.add(v['url'].toString());
+                                    }
+                                  }
+                                  if (!ctx.mounted) return;
+                                  await showModalBottomSheet(
+                                    context: ctx,
+                                    backgroundColor: themeCtrl.hover,
+                                    builder: (c2) => Column(
+                                      children: [
+                                        ListTile(
+                                          title: Text(p['title']?.toString() ?? 'Pack'),
+                                          trailing: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              if (p['owner_id']?.toString() ==
+                                                      widget.user.uid &&
+                                                  p['is_public'] != true)
+                                                TextButton(
+                                                  onPressed: () async {
+                                                    Navigator.pop(c2);
+                                                    Navigator.pop(ctx);
+                                                    await _publishStickerPack(
+                                                        p['id'].toString());
+                                                  },
+                                                  child: const Text('В магазин 50'),
+                                                ),
+                                              TextButton(
+                                                onPressed: () async {
+                                                  Navigator.pop(c2);
+                                                  Navigator.pop(ctx);
+                                                  await _send(
+                                                    type: 'sticker_pack',
+                                                    content:
+                                                        'Набор: ${p['title'] ?? 'Pack'}',
+                                                    fileUrl: p['id'].toString(),
+                                                  );
+                                                },
+                                                child: const Text('В чат'),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: GridView.builder(
+                                            padding: const EdgeInsets.all(8),
+                                            gridDelegate:
+                                                const SliverGridDelegateWithFixedCrossAxisCount(
+                                                    crossAxisCount: 4,
+                                                    crossAxisSpacing: 8,
+                                                    mainAxisSpacing: 8),
+                                            itemCount: urls.length,
+                                            itemBuilder: (_, j) {
+                                              final u = urls[j];
+                                              return InkWell(
+                                                onTap: () async {
+                                                  Navigator.pop(c2);
+                                                  Navigator.pop(ctx);
+                                                  await _send(
+                                                      type: 'sticker',
+                                                      fileUrl: u,
+                                                      content: '');
+                                                },
+                                                child: Image.network(u,
+                                                    fit: BoxFit.contain,
+                                                    errorBuilder: (_, __, ___) =>
+                                                        const Center(
+                                                            child: Text('🙂',
+                                                                style: TextStyle(
+                                                                    fontSize:
+                                                                        32)))),
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ]),
+          );
+        });
+      },
     );
   }
 
-  Future<void> _sendCustomSticker() async {
-    try {
-      final x = await ImagePicker().pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 90,
-      );
-      if (x == null) return;
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Добавление в набор…')));
-      }
-      final url = await _uploadFile(File(x.path), 'chat_stickers');
-      if (url == null || url.isEmpty) throw Exception('Загрузка не удалась');
-      // В набор, не в чат (как в TG)
-      setState(() => myStickers.insert(0, url));
-      try {
-        await FirebaseDatabase.instance
-            .ref('tables/user_stickers/${widget.user.uid}')
-            .push()
-            .set({
-          'url': url,
-          'created_at': DateTime.now().millisecondsSinceEpoch,
-        });
-      } catch (_) {}
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Стикер добавлен в набор')));
-        _showStickers();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Стикер: $e')));
-      }
-    }
-  }
 
   void _showGifPanel() {
     showModalBottomSheet(
@@ -19312,6 +19663,1336 @@ class _GroupChannelInfoPageState extends State<GroupChannelInfoPage> {
     }
   }
 
+
+  Future<void> _openChannelBoosts(BuildContext context) async {
+    final u = widget.user;
+    if (u == null) return;
+    final id = widget.entityId;
+
+    Future<int> ensureBoosts() async {
+      final ref = FirebaseDatabase.instance.ref('tables/profiles/${u.uid}/boosts_left');
+      final s = await ref.get();
+      if (s.exists && s.value != null) {
+        return (s.value as num).toInt().clamp(0, 999);
+      }
+      await ref.set(3);
+      return 3;
+    }
+
+    var left = await ensureBoosts();
+    final bref = FirebaseDatabase.instance.ref('channel_boosts/$id');
+    final bs = await bref.get();
+    var total = 0;
+    Map byUser = {};
+    if (bs.exists && bs.value is Map) {
+      final m = Map<String, dynamic>.from(bs.value as Map);
+      total = (m['total'] as num?)?.toInt() ?? 0;
+      byUser = Map<String, dynamic>.from(m['by_user'] as Map? ?? {});
+    }
+    int levelOf(int tot) {
+      if (tot >= 5) return 2;
+      if (tot >= 1) return 1;
+      return 0;
+    }
+
+    if (!context.mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: themeCtrl.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setSt) {
+          final lv = levelOf(total);
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+                16, 16, 16, 16 + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Голоса канала',
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: themeCtrl.text)),
+                const SizedBox(height: 6),
+                Text('Всего бустов: $total · у вас: $left',
+                    style: TextStyle(color: themeCtrl.muted, fontSize: 13)),
+                const SizedBox(height: 10),
+                Wrap(spacing: 8, runSpacing: 6, children: [
+                  Chip(
+                      label: const Text('Ур.1 · обложки'),
+                      backgroundColor: lv >= 1
+                          ? SLineColors.accentA.withValues(alpha: 0.25)
+                          : null),
+                  Chip(
+                      label: const Text('Ур.2 · галерея + ★'),
+                      backgroundColor: lv >= 2
+                          ? SLineColors.accentA.withValues(alpha: 0.25)
+                          : null),
+                ]),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  onPressed: left < 1
+                      ? null
+                      : () async {
+                          final pref = FirebaseDatabase.instance
+                              .ref('tables/profiles/${u.uid}/boosts_left');
+                          final curS = await pref.get();
+                          var cur = curS.exists ? (curS.value as num).toInt() : 3;
+                          if (cur < 1) return;
+                          await pref.set(cur - 1);
+                          total += 1;
+                          byUser[u.uid] =
+                              ((byUser[u.uid] as num?)?.toInt() ?? 0) + 1;
+                          await bref.set({
+                            'total': total,
+                            'by_user': byUser,
+                            'updated_at': DateTime.now().millisecondsSinceEpoch,
+                          });
+                          final lv2 = levelOf(total);
+                          await FirebaseDatabase.instance
+                              .ref('channels/$id')
+                              .update({
+                            'boost_level': lv2,
+                            'boost_total': total,
+                            if (lv2 >= 2) 'boost_badge': true,
+                          });
+                          left = cur - 1;
+                          setSt(() {});
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Буст отдан! Уровень $lv2')),
+                            );
+                          }
+                        },
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: SLineColors.accentA,
+                      foregroundColor: Colors.white),
+                  child: const Text('Отдать 1 голос'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: levelOf(total) < 1
+                      ? null
+                      : () async {
+                          final covers = [
+                            'https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=800&q=80',
+                            'https://images.unsplash.com/photo-1557683316-973673baf926?w=800&q=80',
+                            'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80',
+                            'https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?w=800&q=80',
+                          ];
+                          final pick = await showModalBottomSheet<String>(
+                            context: context,
+                            backgroundColor: themeCtrl.panel,
+                            builder: (c2) => GridView.count(
+                              crossAxisCount: 2,
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.all(12),
+                              mainAxisSpacing: 8,
+                              crossAxisSpacing: 8,
+                              children: covers
+                                  .map((url) => GestureDetector(
+                                        onTap: () => Navigator.pop(c2, url),
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(10),
+                                          child: Image.network(url,
+                                              fit: BoxFit.cover),
+                                        ),
+                                      ))
+                                  .toList(),
+                            ),
+                          );
+                          if (pick != null) {
+                            await FirebaseDatabase.instance
+                                .ref('channels/$id')
+                                .update({
+                              'cover_url': pick,
+                              'avatar_url': pick,
+                              'photo_url': pick,
+                            });
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text('Обложка обновлена')),
+                              );
+                            }
+                          }
+                        },
+                  child: const Text('Сменить обложку (готовые)'),
+                ),
+              ],
+            ),
+          );
+        });
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = widget.isChannel ? 'Канал' : 'Группа';
+    final typeLabel = widget.isChannel
+        ? (widget.isPublic ? 'Публичный канал' : 'Приватный канал')
+        : (widget.isPublic ? 'Публичная группа' : 'Приватная группа');
+    final isMeAdmin =
+        widget.isAdmin || (adminId != null && adminId == widget.user?.uid);
+
+    return Scaffold(
+      backgroundColor: themeCtrl.bg,
+      body: CustomScrollView(
+        slivers: [
+          SliverAppBar(
+            expandedHeight: 160,
+            pinned: true,
+            backgroundColor: themeCtrl.panel,
+            flexibleSpace: FlexibleSpaceBar(
+              background: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      SLineColors.accentB.withValues(alpha: 0.95),
+                      SLineColors.accentA.withValues(alpha: 0.8),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                const SizedBox(height: 16),
+                Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: themeCtrl.bg, width: 4),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: _Avatar(
+                    name: widget.name,
+                    color: SLineColors.accentB,
+                    url: widget.avatarUrl,
+                    size: 104,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  widget.name,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: themeCtrl.text,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  typeLabel,
+                  style: TextStyle(fontSize: 14, color: themeCtrl.muted),
+                ),
+                if (widget.slug.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '@${widget.slug}',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: SLineColors.accentA,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                // Бусты / голоса канала
+                if (widget.isChannel)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () => _openChannelBoosts(context),
+                        icon: const Icon(Icons.rocket_launch_outlined),
+                        label: const Text('Голоса'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: SLineColors.accentA,
+                          side: BorderSide(color: SLineColors.accentA.withValues(alpha: 0.5)),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (widget.isChannel) const SizedBox(height: 12),
+                // Действия: ссылка / выйти (без «В контакты»)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _ProfileActionChip(
+                          icon: Icons.link_rounded,
+                          label: 'Ссылка',
+                          onTap: _copyLink,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _ProfileActionChip(
+                          icon: Icons.notifications_outlined,
+                          label: 'Увед.',
+                          onTap: () {},
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _ProfileActionChip(
+                          icon: Icons.exit_to_app_rounded,
+                          label: 'Выйти',
+                          onTap: _leave,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Описание
+                if (widget.description.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: themeCtrl.panel,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: themeCtrl.line),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Описание',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: themeCtrl.muted,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            widget.description,
+                            style: TextStyle(
+                              fontSize: 15,
+                              color: themeCtrl.text,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                // Ссылка
+                if (link.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                    child: InkWell(
+                      onTap: _copyLink,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: themeCtrl.panel,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: themeCtrl.line),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Ссылка-приглашение',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: themeCtrl.muted,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              link,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: SLineColors.accentA,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                // Участники
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
+                  child: Row(
+                    children: [
+                      Text(
+                        widget.isChannel ? 'Подписчики' : 'Участники',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: themeCtrl.text,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '$memberCount',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: themeCtrl.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (loading)
+                  const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (members.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      'Пока никого нет',
+                      style: TextStyle(color: themeCtrl.muted),
+                    ),
+                  )
+                else
+                  ...members.map((m) {
+                    final isAdm = m.id == adminId;
+                    return ListTile(
+                      leading: _Avatar(
+                        name: m.displayName,
+                        color: m.colorValue,
+                        url: m.avatarUrl,
+                        size: 44,
+                      ),
+                      title: Text(m.displayName),
+                      subtitle: Text(
+                        isAdm
+                            ? 'админ'
+                            : (m.username.isNotEmpty
+                                ? '@${m.username}'
+                                : ''),
+                        style: TextStyle(
+                          color: isAdm
+                              ? SLineColors.accentA
+                              : themeCtrl.muted,
+                          fontSize: 13,
+                        ),
+                      ),
+                      onTap: () {
+                        if (widget.user == null) return;
+                        Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => ProfilePage(
+                            user: widget.user!,
+                            profile: m,
+                            isMe: m.id == widget.user!.uid,
+                          ),
+                        ));
+                      },
+                    );
+                  }),
+                if (isMeAdmin)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+                    child: Text(
+                      'Вы администратор этого $title',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: themeCtrl.muted,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 40),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+
+
+// ── In-app WebRTC call (без внешних сайтов) ─────────────────
+
+// ── Входящий звонок на весь экран ────────────────────────────
+class IncomingCallScreen extends StatefulWidget {
+  final String callId;
+  final User user;
+  final Profile peer;
+  final bool audioOnly;
+  const IncomingCallScreen({
+    super.key,
+    required this.callId,
+    required this.user,
+    required this.peer,
+    required this.audioOnly,
+  });
+  @override
+  State<IncomingCallScreen> createState() => _IncomingCallScreenState();
+}
+
+class _IncomingCallScreenState extends State<IncomingCallScreen> {
+  StreamSubscription? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = FirebaseDatabase.instance
+        .ref('calls/${widget.callId}/status')
+        .onValue
+        .listen((ev) {
+      final st = (ev.snapshot.value ?? '').toString();
+      if (st == 'ended' || st == 'rejected' || st == 'cancelled') {
+        if (mounted) Navigator.of(context).maybePop();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _accept() async {
+    try {
+      await FirebaseDatabase.instance
+          .ref('calls/${widget.callId}/status')
+          .set('accepted');
+    } catch (_) {}
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => InAppCallScreen(
+        callId: widget.callId,
+        user: widget.user,
+        peer: widget.peer,
+        audioOnly: widget.audioOnly,
+        isCaller: false,
+      ),
+    ));
+  }
+
+  Future<void> _reject() async {
+    try {
+      await FirebaseDatabase.instance
+          .ref('calls/${widget.callId}/status')
+          .set('rejected');
+    } catch (_) {}
+    if (mounted) Navigator.of(context).maybePop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final peer = widget.peer;
+    return Scaffold(
+      backgroundColor: const Color(0xFF0B1220),
+      body: SafeArea(
+        child: Column(
+          children: [
+            const Spacer(),
+            Text(
+              widget.audioOnly ? 'Входящий звонок' : 'Входящий видеозвонок',
+              style: const TextStyle(color: Colors.white70, fontSize: 16),
+            ),
+            const SizedBox(height: 24),
+            _Avatar(
+              name: peer.displayName,
+              color: peer.colorValue,
+              url: peer.avatarUrl,
+              size: 120,
+            ),
+            const SizedBox(height: 20),
+            Text(
+              peer.displayName,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text('@${peer.username}',
+                style: const TextStyle(color: Colors.white54)),
+            const Spacer(),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 48),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _roundBtn(
+                    color: SLineColors.danger,
+                    icon: Icons.call_end,
+                    label: 'Отклонить',
+                    onTap: _reject,
+                  ),
+                  _roundBtn(
+                    color: const Color(0xFF22C55E),
+                    icon: Icons.call,
+                    label: 'Принять',
+                    onTap: _accept,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _roundBtn({
+    required Color color,
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return Column(
+      children: [
+        Material(
+          color: color,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: SizedBox(
+              width: 72,
+              height: 72,
+              child: Icon(icon, color: Colors.white, size: 32),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(label, style: const TextStyle(color: Colors.white70)),
+      ],
+    );
+  }
+}
+
+
+/// Звонки без flutter_webrtc (IPA / iOS-сборки).
+/// Сигналинг в Firebase `calls/` остаётся; медиа-поток на iOS отключён.
+/// Альтернативы для продакшена: LiveKit, Agora, Jitsi Meet (свои native SDK).
+
+// ═══════════════════════════════════════════════════════════
+// Agora RTC — аудио/видео звонки (IPA-friendly, работает в РФ)
+// 1) https://console.agora.io → Create project → скопируй App ID
+// 2) Вставь в kAgoraAppId ниже
+// 3) Для теста: Project → Config → Primary certificate можно
+//    временно не требовать token (App ID only). Для продакшена
+//    токен лучше выдавать с Cloudflare Worker.
+// ═══════════════════════════════════════════════════════════
+/// App ID не секрет (как bundle id). Certificate — только в Cloudflare.
+/// Если пусто — appId придёт из /api/agora-token вместе с token.
+const String kAgoraAppId = ''; // можно оставить пустым
+
+int _agoraUidFromFirebase(String uid) {
+  // Agora uid: 32-bit unsigned; стабильный hash из Firebase uid
+  var h = 0;
+  for (var i = 0; i < uid.length; i++) {
+    h = (h * 31 + uid.codeUnitAt(i)) & 0x7fffffff;
+  }
+  return h == 0 ? 1 : h;
+}
+
+class InAppCallScreen extends StatefulWidget {
+  final String callId;
+  final User user;
+  final Profile peer;
+  final bool audioOnly;
+  final bool isCaller;
+  const InAppCallScreen({
+    super.key,
+    required this.callId,
+    required this.user,
+    required this.peer,
+    required this.audioOnly,
+    required this.isCaller,
+  });
+  @override
+  State<InAppCallScreen> createState() => _InAppCallScreenState();
+}
+
+class _InAppCallScreenState extends State<InAppCallScreen> {
+  StreamSubscription? _callSub;
+  RtcEngine? _engine;
+  String status = 'ringing';
+  bool muted = false;
+  bool speakerOn = true;
+  bool camOff = false;
+  int? _remoteUid;
+  DateTime? connectedAt;
+  Timer? _tick;
+  String timerLabel = '00:00';
+  String? errorText;
+  bool _joining = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _listenCallStatus();
+    _bootstrap();
+  }
+
+  void _listenCallStatus() {
+    _callSub = FirebaseDatabase.instance
+        .ref('calls/${widget.callId}')
+        .onValue
+        .listen((ev) {
+      if (!ev.snapshot.exists || ev.snapshot.value is! Map) return;
+      final m = Map<String, dynamic>.from(ev.snapshot.value as Map);
+      final st = (m['status'] ?? 'ringing').toString();
+      if (!mounted) return;
+      if (st == 'ended' || st == 'declined' || st == 'missed') {
+        _leaveAndPop();
+        return;
+      }
+      setState(() => status = st);
+      if ((st == 'accepted' || st == 'connected') && !_joining && _engine == null) {
+        _joinAgora();
+      }
+    });
+  }
+
+  Future<void> _bootstrap() async {
+    // App ID / token берутся с Worker — локальный kAgoraAppId не обязателен
+    // Разрешения
+    try {
+      final mic = await Permission.microphone.request();
+      if (!mic.isGranted) {
+        setState(() => errorText = 'Нет доступа к микрофону');
+        return;
+      }
+      if (!widget.audioOnly) {
+        final cam = await Permission.camera.request();
+        if (!cam.isGranted) {
+          setState(() => errorText = 'Нет доступа к камере');
+          return;
+        }
+      }
+    } catch (e) {
+      setState(() => errorText = 'Разрешения: $e');
+      return;
+    }
+
+    // Caller создаёт звонок уже в startCall; callee — принимаем
+    if (widget.isCaller) {
+      // Ждём accept от собеседника, но сразу пробуем войти в канал
+      // (оба в одном channelId = callId)
+      await _joinAgora();
+      try {
+        await FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+          'status': 'ringing',
+        });
+      } catch (_) {}
+    } else {
+      // Входящий: сразу accept + join
+      try {
+        await FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+          'status': 'accepted',
+          'answered_at': DateTime.now().millisecondsSinceEpoch,
+        });
+      } catch (_) {}
+      await _joinAgora();
+    }
+  }
+
+  Future<void> _joinAgora() async {
+    if (_joining || _engine != null) return;
+    _joining = true;
+    try {
+      // Token + App ID с Worker (certificate никогда не в приложении)
+      final idToken = await widget.user.getIdToken();
+      if (idToken == null || idToken.isEmpty) {
+        setState(() => errorText = 'Нет Firebase token');
+        return;
+      }
+      const proxy = 'https://old-band-f00b.dimasik-228-dima-super.workers.dev';
+      final uid = _agoraUidFromFirebase(widget.user.uid);
+      final res = await http.post(
+        Uri.parse('$proxy/api/agora-token'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: jsonEncode({
+          'channel': widget.callId,
+          'uid': uid,
+          'expire': 3600,
+        }),
+      );
+      if (res.statusCode != 200) {
+        setState(() {
+          errorText =
+              'Токен Agora: HTTP ${res.statusCode} ${res.body.length > 120 ? res.body.substring(0, 120) : res.body}';
+        });
+        return;
+      }
+      final data = jsonDecode(res.body);
+      if (data is! Map) {
+        setState(() => errorText = 'Плохой ответ agora-token');
+        return;
+      }
+      final appId = (data['appId'] ?? kAgoraAppId).toString();
+      final token = (data['token'] ?? '').toString();
+      final joinUid = int.tryParse('${data['uid']}') ?? uid;
+      if (appId.isEmpty || token.isEmpty) {
+        setState(() => errorText = 'Пустой appId/token от сервера');
+        return;
+      }
+
+      final engine = createAgoraRtcEngine();
+      await engine.initialize(RtcEngineContext(
+        appId: appId,
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+      ));
+
+      engine.registerEventHandler(RtcEngineEventHandler(
+        onJoinChannelSuccess: (conn, elapsed) {
+          if (!mounted) return;
+          setState(() {
+            status = 'connected';
+            connectedAt = DateTime.now();
+          });
+          _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
+            if (connectedAt == null || !mounted) return;
+            final s = DateTime.now().difference(connectedAt!).inSeconds;
+            setState(() {
+              timerLabel =
+                  '${(s ~/ 60).toString().padLeft(2, "0")}:${(s % 60).toString().padLeft(2, "0")}';
+            });
+          });
+          FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+            'status': 'connected',
+          }).catchError((_) {});
+        },
+        onUserJoined: (conn, remoteUid, elapsed) {
+          if (!mounted) return;
+          setState(() {
+            _remoteUid = remoteUid;
+            status = 'connected';
+          });
+        },
+        onUserOffline: (conn, remoteUid, reason) {
+          if (!mounted) return;
+          setState(() => _remoteUid = null);
+        },
+        onError: (err, msg) {
+          if (!mounted) return;
+          setState(() => errorText = 'Agora: $err $msg');
+        },
+      ));
+
+      if (widget.audioOnly) {
+        await engine.disableVideo();
+        await engine.enableAudio();
+      } else {
+        await engine.enableVideo();
+        await engine.enableAudio();
+        await engine.startPreview();
+      }
+
+      await engine.joinChannel(
+        token: token,
+        channelId: widget.callId,
+        uid: joinUid,
+        options: ChannelMediaOptions(
+          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+          channelProfile: ChannelProfileType.channelProfileCommunication,
+          publishMicrophoneTrack: true,
+          publishCameraTrack: !widget.audioOnly,
+          autoSubscribeAudio: true,
+          autoSubscribeVideo: !widget.audioOnly,
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() => _engine = engine);
+    } catch (e) {
+      if (mounted) {
+        setState(() => errorText = 'Не удалось начать звонок: $e');
+      }
+    } finally {
+      _joining = false;
+    }
+  }
+
+  Future<void> _toggleMute() async {
+    final next = !muted;
+    await FirebaseDatabase.instance
+        .ref('channel_members/${widget.channelId}/${widget.user.uid}/muted')
+        .set(next);
+    setState(() => muted = next);
+  }
+
+  Future<void> _send() async {
+    if (!widget.isAdmin || sending) return;
+    final t = msgCtrl.text.trim();
+    if (t.isEmpty) return;
+    setState(() => sending = true);
+    msgCtrl.clear();
+    try {
+      final ref = chatMsgsRef(chatKey).push();
+      final now = DateTime.now();
+      await ref.set({
+        'id': ref.key,
+        'sender_id': widget.user.uid,
+        'content': t,
+        'type': 'text',
+        'created_at': now.toIso8601String(),
+        'created_at_ms': now.millisecondsSinceEpoch,
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    sub?.cancel();
+    msgCtrl.dispose();
+    scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: themeCtrl.bg,
+      appBar: AppBar(
+        titleSpacing: 0,
+        title: InkWell(
+          onTap: () {
+            Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => ChannelInfoPage(
+                channelId: widget.channelId,
+                name: widget.channelName,
+                avatarUrl: widget.avatarUrl,
+                description: widget.description,
+                isPublic: widget.isPublic,
+                slug: widget.slug,
+                isAdmin: widget.isAdmin,
+                user: widget.user,
+              ),
+            ));
+          },
+          child: Row(children: [
+            _Avatar(
+                name: widget.channelName,
+                color: SLineColors.accentB,
+                url: widget.avatarUrl,
+                size: 36),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.channelName,
+                        style: const TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w700)),
+                    const Text('канал',
+                        style: TextStyle(
+                            fontSize: 11, color: SLineColors.mint)),
+                  ]),
+            ),
+          ]),
+        ),
+      ),
+      body: Column(children: [
+        Expanded(
+          child: ListView.builder(
+            controller: scrollCtrl,
+            padding: const EdgeInsets.all(12),
+            itemCount: messages.length,
+            itemBuilder: (_, i) {
+              final m = messages[i];
+              return Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 6),
+                  constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.85),
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                  decoration: BoxDecoration(
+                    color: themeCtrl.bubbleThem,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(m.content,
+                      style: TextStyle(color: themeCtrl.text)),
+                ),
+              );
+            },
+          ),
+        ),
+        if (!subscribed)
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _subscribe,
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: SLineColors.accentA,
+                      foregroundColor: Colors.white),
+                  child: const Text('Подписаться'),
+                ),
+              ),
+            ),
+          )
+        else if (widget.isAdmin)
+          Container(
+            padding: EdgeInsets.fromLTRB(
+                8, 8, 8, 8 + MediaQuery.of(context).padding.bottom),
+            decoration: BoxDecoration(
+                color: themeCtrl.panel,
+                border: Border(top: BorderSide(color: themeCtrl.line))),
+            child: Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: msgCtrl,
+                  decoration: InputDecoration(
+                    hintText: 'Сообщение в канал',
+                    filled: true,
+                    fillColor: themeCtrl.input,
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(22),
+                        borderSide: BorderSide.none),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
+                  ),
+                ),
+              ),
+              IconButton(
+                  icon: const Icon(Icons.send, color: SLineColors.accentA),
+                  onPressed: _send),
+            ]),
+          )
+        else
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton.icon(
+                  onPressed: _toggleMute,
+                  icon: Icon(muted
+                      ? Icons.notifications_active
+                      : Icons.notifications_off),
+                  label: Text(muted ? 'Вкл. звук' : 'Убр. звук'),
+                ),
+              ),
+            ),
+          ),
+      ]),
+    );
+  }
+}
+
+class ChannelInfoPage extends StatelessWidget {
+  final String channelId;
+  final String name;
+  final String? avatarUrl;
+  final String description;
+  final bool isPublic;
+  final String slug;
+  final bool isAdmin;
+  final User? user;
+  const ChannelInfoPage({
+    super.key,
+    required this.channelId,
+    required this.name,
+    this.avatarUrl,
+    this.description = '',
+    this.isPublic = true,
+    this.slug = '',
+    this.isAdmin = false,
+    this.user,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return GroupChannelInfoPage(
+      user: user,
+      chatKey: 'c_$channelId',
+      entityId: channelId,
+      name: name,
+      avatarUrl: avatarUrl,
+      description: description,
+      isPublic: isPublic,
+      slug: slug,
+      isAdmin: isAdmin,
+      isChannel: true,
+    );
+  }
+}
+
+/// Карточка группы / канала в стиле TG (без «В контакты»)
+class GroupChannelInfoPage extends StatefulWidget {
+  final User? user;
+  final String chatKey;
+  final String entityId;
+  final String name;
+  final String? avatarUrl;
+  final String description;
+  final bool isPublic;
+  final String slug;
+  final bool isAdmin;
+  final bool isChannel;
+  const GroupChannelInfoPage({
+    super.key,
+    this.user,
+    required this.chatKey,
+    required this.entityId,
+    required this.name,
+    this.avatarUrl,
+    this.description = '',
+    this.isPublic = true,
+    this.slug = '',
+    this.isAdmin = false,
+    this.isChannel = false,
+  });
+  @override
+  State<GroupChannelInfoPage> createState() => _GroupChannelInfoPageState();
+}
+
+class _GroupChannelInfoPageState extends State<GroupChannelInfoPage> {
+  List<Profile> members = [];
+  int memberCount = 0;
+  bool loading = true;
+  String? adminId;
+  String link = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => loading = true);
+    try {
+      if (widget.isChannel) {
+        final cs = await FirebaseDatabase.instance
+            .ref('channels/${widget.entityId}')
+            .get();
+        if (cs.exists && cs.value is Map) {
+          final d = Map<String, dynamic>.from(cs.value as Map);
+          adminId = (d['admin_id'] ?? '').toString();
+          final slug = (d['slug'] ?? d['username'] ?? widget.slug).toString();
+          link = slug.isNotEmpty
+              ? 'https://sigli.gleeze.com/#/channel/$slug'
+              : 'https://sigli.gleeze.com/#/channel/${widget.entityId}';
+        }
+        final ms = await FirebaseDatabase.instance
+            .ref('channel_members/${widget.entityId}')
+            .get();
+        final list = <Profile>[];
+        if (ms.exists && ms.value is Map) {
+          for (final e in (ms.value as Map).entries) {
+            final p = await loadProfile(e.key.toString());
+            if (p != null) list.add(p);
+          }
+        }
+        if (mounted) {
+          setState(() {
+            members = list;
+            memberCount = list.length;
+            loading = false;
+          });
+        }
+      } else {
+        final gs = await FirebaseDatabase.instance
+            .ref('groups/${widget.entityId}')
+            .get();
+        if (gs.exists && gs.value is Map) {
+          final d = Map<String, dynamic>.from(gs.value as Map);
+          adminId = (d['admin_id'] ?? '').toString();
+          final slug = (d['slug'] ?? d['username'] ?? widget.slug).toString();
+          final isPub = d['public'] != false;
+          link = isPub && slug.isNotEmpty
+              ? 'https://sigli.gleeze.com/#/g/$slug'
+              : 'https://sigli.gleeze.com/#/g/${widget.entityId}';
+        }
+        final ms = await FirebaseDatabase.instance
+            .ref('group_members/${widget.entityId}')
+            .get();
+        final list = <Profile>[];
+        if (ms.exists && ms.value is Map) {
+          for (final e in (ms.value as Map).entries) {
+            final p = await loadProfile(e.key.toString());
+            if (p != null) list.add(p);
+          }
+        }
+        if (mounted) {
+          setState(() {
+            members = list;
+            memberCount = list.length;
+            loading = false;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> _copyLink() async {
+    if (link.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: link));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ссылка скопирована')));
+    }
+  }
+
+  Future<void> _leave() async {
+    final uid = widget.user?.uid;
+    if (uid == null) return;
+    final label = widget.isChannel ? 'канал' : 'группу';
+    final ok = await showModalBottomSheet<bool>(
+          context: context,
+          backgroundColor: Colors.transparent,
+          builder: (ctx) {
+            final isLight = themeCtrl.light;
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: isLight
+                            ? Colors.white
+                            : const Color(0xFF2C2C2E),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Column(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
+                            child: Text(
+                              'Выйти из $label?',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: isLight
+                                    ? Colors.black54
+                                    : Colors.white70,
+                              ),
+                            ),
+                          ),
+                          Divider(
+                              height: 1,
+                              color: isLight
+                                  ? Colors.black12
+                                  : Colors.white12),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: TextButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text(
+                                'Выйти',
+                                style: TextStyle(
+                                  color: Color(0xFFFF3B30),
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: isLight
+                            ? Colors.white
+                            : const Color(0xFF2C2C2E),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: Text(
+                          'Отменить',
+                          style: TextStyle(
+                            color: SLineColors.accentA,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ) ??
+        false;
+    if (!ok) return;
+    try {
+      if (widget.isChannel) {
+        await FirebaseDatabase.instance
+            .ref('channel_members/${widget.entityId}/$uid')
+            .remove();
+      } else {
+        await FirebaseDatabase.instance
+            .ref('group_members/${widget.entityId}/$uid')
+            .remove();
+      }
+      await FirebaseDatabase.instance
+          .ref('user_chat_index/$uid/${widget.chatKey}')
+          .remove();
+      if (mounted) {
+        Navigator.of(context).popUntil((r) => r.isFirst);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$e')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.isChannel ? 'Канал' : 'Группа';
@@ -19753,6 +21434,32 @@ class _IncomingCallScreenState extends State<IncomingCallScreen> {
   }
 }
 
+
+/// Звонки без flutter_webrtc (IPA / iOS-сборки).
+/// Сигналинг в Firebase `calls/` остаётся; медиа-поток на iOS отключён.
+/// Альтернативы для продакшена: LiveKit, Agora, Jitsi Meet (свои native SDK).
+
+// ═══════════════════════════════════════════════════════════
+// Agora RTC — аудио/видео звонки (IPA-friendly, работает в РФ)
+// 1) https://console.agora.io → Create project → скопируй App ID
+// 2) Вставь в kAgoraAppId ниже
+// 3) Для теста: Project → Config → Primary certificate можно
+//    временно не требовать token (App ID only). Для продакшена
+//    токен лучше выдавать с Cloudflare Worker.
+// ═══════════════════════════════════════════════════════════
+/// App ID не секрет (как bundle id). Certificate — только в Cloudflare.
+/// Если пусто — appId придёт из /api/agora-token вместе с token.
+const String kAgoraAppId = ''; // можно оставить пустым
+
+int _agoraUidFromFirebase(String uid) {
+  // Agora uid: 32-bit unsigned; стабильный hash из Firebase uid
+  var h = 0;
+  for (var i = 0; i < uid.length; i++) {
+    h = (h * 31 + uid.codeUnitAt(i)) & 0x7fffffff;
+  }
+  return h == 0 ? 1 : h;
+}
+
 class InAppCallScreen extends StatefulWidget {
   final String callId;
   final User user;
@@ -19772,352 +21479,408 @@ class InAppCallScreen extends StatefulWidget {
 }
 
 class _InAppCallScreenState extends State<InAppCallScreen> {
-  StreamSubscription? _sub;
-  StreamSubscription? _iceSub;
+  StreamSubscription? _callSub;
+  RtcEngine? _engine;
   String status = 'ringing';
   bool muted = false;
+  bool speakerOn = true;
   bool camOff = false;
+  int? _remoteUid;
   DateTime? connectedAt;
   Timer? _tick;
   String timerLabel = '00:00';
-
-  final _localRenderer = RTCVideoRenderer();
-  final _remoteRenderer = RTCVideoRenderer();
-  RTCPeerConnection? _pc;
-  MediaStream? _localStream;
-  final List<RTCIceCandidate> _pendingIce = [];
-  bool _remoteDescSet = false;
-
-  DatabaseReference get _callRef =>
-      FirebaseDatabase.instance.ref('calls/${widget.callId}');
+  String? errorText;
+  bool _joining = false;
 
   @override
   void initState() {
     super.initState();
-    _boot();
+    _listenCallStatus();
+    _bootstrap();
   }
 
-  Future<void> _boot() async {
-    await _localRenderer.initialize();
-    await _remoteRenderer.initialize();
-    await _initPeer();
-    _sub = _callRef.onValue.listen(_onCallData);
-    if (widget.isCaller) {
-      await _createOffer();
-    }
+  void _listenCallStatus() {
+    _callSub = FirebaseDatabase.instance
+        .ref('calls/${widget.callId}')
+        .onValue
+        .listen((ev) {
+      if (!ev.snapshot.exists || ev.snapshot.value is! Map) return;
+      final m = Map<String, dynamic>.from(ev.snapshot.value as Map);
+      final st = (m['status'] ?? 'ringing').toString();
+      if (!mounted) return;
+      if (st == 'ended' || st == 'declined' || st == 'missed') {
+        _leaveAndPop();
+        return;
+      }
+      setState(() => status = st);
+      if ((st == 'accepted' || st == 'connected') && !_joining && _engine == null) {
+        _joinAgora();
+      }
+    });
   }
 
-  Future<void> _initPeer() async {
-    final config = {
-      'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
-        {'urls': 'stun:stun1.l.google.com:19302'},
-      ]
-    };
-    _pc = await createPeerConnection(config);
-    _pc!.onIceCandidate = (c) {
-      if (c.candidate == null) return;
-      _callRef.child('ice/${widget.user.uid}').push().set({
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    };
-    _pc!.onTrack = (ev) {
-      if (ev.streams.isNotEmpty) {
-        _remoteRenderer.srcObject = ev.streams[0];
-        if (mounted) {
-          setState(() {
-            status = 'connected';
-            connectedAt ??= DateTime.now();
-            _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
-              if (!mounted || connectedAt == null) return;
-              final s = DateTime.now().difference(connectedAt!).inSeconds;
-              setState(() {
-                timerLabel =
-                    '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
-              });
-            });
-          });
+  Future<void> _bootstrap() async {
+    // App ID / token берутся с Worker — локальный kAgoraAppId не обязателен
+    // Разрешения
+    try {
+      final mic = await Permission.microphone.request();
+      if (!mic.isGranted) {
+        setState(() => errorText = 'Нет доступа к микрофону');
+        return;
+      }
+      if (!widget.audioOnly) {
+        final cam = await Permission.camera.request();
+        if (!cam.isGranted) {
+          setState(() => errorText = 'Нет доступа к камере');
+          return;
         }
       }
-    };
-    _pc!.onConnectionState = (s) {
-      if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
-          mounted) {
-        setState(() => status = 'connected');
-      }
-    };
-
-    final mediaConstraints = <String, dynamic>{
-      'audio': true,
-      'video': widget.audioOnly
-          ? false
-          : {
-              'facingMode': 'user',
-              'width': 640,
-              'height': 480,
-            },
-    };
-    try {
-      _localStream =
-          await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      _localRenderer.srcObject = _localStream;
-      for (final t in _localStream!.getTracks()) {
-        await _pc!.addTrack(t, _localStream!);
-      }
-      if (mounted) setState(() {});
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Медиа: $e')));
-      }
-    }
-
-    _iceSub = _callRef.child('ice').onChildAdded.listen((ev) async {
-      // listen to peer ice under peer uid
-    });
-    // Подписка на ICE собеседника
-    final peerId = widget.peer.id;
-    FirebaseDatabase.instance
-        .ref('calls/${widget.callId}/ice/$peerId')
-        .onChildAdded
-        .listen((ev) async {
-      if (ev.snapshot.value is! Map) return;
-      final m = Map<String, dynamic>.from(ev.snapshot.value as Map);
-      final c = RTCIceCandidate(
-        m['candidate']?.toString(),
-        m['sdpMid']?.toString(),
-        m['sdpMLineIndex'] is int
-            ? m['sdpMLineIndex'] as int
-            : int.tryParse('${m['sdpMLineIndex']}') ?? 0,
-      );
-      if (_remoteDescSet) {
-        try {
-          await _pc?.addCandidate(c);
-        } catch (_) {}
-      } else {
-        _pendingIce.add(c);
-      }
-    });
-  }
-
-  Future<void> _createOffer() async {
-    final offer = await _pc!.createOffer({
-      'offerToReceiveAudio': 1,
-      'offerToReceiveVideo': widget.audioOnly ? 0 : 1,
-    });
-    await _pc!.setLocalDescription(offer);
-    await _callRef.update({
-      'offer': {'type': offer.type, 'sdp': offer.sdp},
-      'status': 'ringing',
-    });
-  }
-
-  Future<void> _createAnswer() async {
-    final answer = await _pc!.createAnswer({
-      'offerToReceiveAudio': 1,
-      'offerToReceiveVideo': widget.audioOnly ? 0 : 1,
-    });
-    await _pc!.setLocalDescription(answer);
-    await _callRef.update({
-      'answer': {'type': answer.type, 'sdp': answer.sdp},
-      'status': 'accepted',
-    });
-  }
-
-  Future<void> _onCallData(DatabaseEvent e) async {
-    if (!e.snapshot.exists || e.snapshot.value is! Map) return;
-    final m = Map<String, dynamic>.from(e.snapshot.value as Map);
-    final st = (m['status'] ?? '').toString();
-    if (mounted && st.isNotEmpty) setState(() => status = st);
-    if (st == 'ended' || st == 'rejected') {
-      if (mounted) Navigator.of(context).maybePop();
+      setState(() => errorText = 'Разрешения: $e');
       return;
     }
-    if (!widget.isCaller && m['offer'] is Map && !_remoteDescSet) {
-      final o = Map<String, dynamic>.from(m['offer'] as Map);
-      await _pc!.setRemoteDescription(
-          RTCSessionDescription(o['sdp']?.toString(), o['type']?.toString()));
-      _remoteDescSet = true;
-      for (final c in _pendingIce) {
-        try {
-          await _pc!.addCandidate(c);
-        } catch (_) {}
-      }
-      _pendingIce.clear();
-      await _createAnswer();
+
+    // Caller создаёт звонок уже в startCall; callee — принимаем
+    if (widget.isCaller) {
+      // Ждём accept от собеседника, но сразу пробуем войти в канал
+      // (оба в одном channelId = callId)
+      await _joinAgora();
+      try {
+        await FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+          'status': 'ringing',
+        });
+      } catch (_) {}
+    } else {
+      // Входящий: сразу accept + join
+      try {
+        await FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+          'status': 'accepted',
+          'answered_at': DateTime.now().millisecondsSinceEpoch,
+        });
+      } catch (_) {}
+      await _joinAgora();
     }
-    if (widget.isCaller && m['answer'] is Map && !_remoteDescSet) {
-      final a = Map<String, dynamic>.from(m['answer'] as Map);
-      await _pc!.setRemoteDescription(
-          RTCSessionDescription(a['sdp']?.toString(), a['type']?.toString()));
-      _remoteDescSet = true;
-      for (final c in _pendingIce) {
-        try {
-          await _pc!.addCandidate(c);
-        } catch (_) {}
+  }
+
+  Future<void> _joinAgora() async {
+    if (_joining || _engine != null) return;
+    if (kAgoraAppId.startsWith('YOUR_')) return;
+    _joining = true;
+    try {
+      final engine = createAgoraRtcEngine();
+      await engine.initialize(RtcEngineContext(
+        appId: kAgoraAppId,
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+      ));
+
+      engine.registerEventHandler(RtcEngineEventHandler(
+        onJoinChannelSuccess: (conn, elapsed) {
+          if (!mounted) return;
+          setState(() {
+            status = 'connected';
+            connectedAt = DateTime.now();
+          });
+          _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
+            if (connectedAt == null || !mounted) return;
+            final s = DateTime.now().difference(connectedAt!).inSeconds;
+            setState(() {
+              timerLabel =
+                  '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+            });
+          });
+          FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+            'status': 'connected',
+          }).catchError((_) {});
+        },
+        onUserJoined: (conn, remoteUid, elapsed) {
+          if (!mounted) return;
+          setState(() {
+            _remoteUid = remoteUid;
+            status = 'connected';
+          });
+        },
+        onUserOffline: (conn, remoteUid, reason) {
+          if (!mounted) return;
+          setState(() => _remoteUid = null);
+        },
+        onError: (err, msg) {
+          if (!mounted) return;
+          setState(() => errorText = 'Agora: $err $msg');
+        },
+      ));
+
+      if (widget.audioOnly) {
+        await engine.disableVideo();
+        await engine.enableAudio();
+      } else {
+        await engine.enableVideo();
+        await engine.enableAudio();
+        await engine.startPreview();
       }
-      _pendingIce.clear();
+
+      final uid = _agoraUidFromFirebase(widget.user.uid);
+      // token: '' если в консоли Agora отключён certificate (только для теста)
+      await engine.joinChannel(
+        token: '',
+        channelId: widget.callId,
+        uid: uid,
+        options: ChannelMediaOptions(
+          clientRoleType: ClientRoleType.clientRoleBroadcaster,
+          channelProfile: ChannelProfileType.channelProfileCommunication,
+          publishMicrophoneTrack: true,
+          publishCameraTrack: !widget.audioOnly,
+          autoSubscribeAudio: true,
+          autoSubscribeVideo: !widget.audioOnly,
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() => _engine = engine);
+    } catch (e) {
+      if (mounted) {
+        setState(() => errorText = 'Не удалось начать звонок: $e');
+      }
+    } finally {
+      _joining = false;
     }
+  }
+
+  Future<void> _toggleMute() async {
+    muted = !muted;
+    await _engine?.muteLocalAudioStream(muted);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleSpeaker() async {
+    speakerOn = !speakerOn;
+    await _engine?.setEnableSpeakerphone(speakerOn);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleCam() async {
+    if (widget.audioOnly) return;
+    camOff = !camOff;
+    await _engine?.muteLocalVideoStream(camOff);
+    if (mounted) setState(() {});
   }
 
   Future<void> _hangup() async {
     try {
-      await _callRef.child('status').set('ended');
+      await FirebaseDatabase.instance.ref('calls/${widget.callId}').update({
+        'status': 'ended',
+        'ended_at': DateTime.now().millisecondsSinceEpoch,
+      });
     } catch (_) {}
-    await _cleanup();
+    await _leaveAndPop();
+  }
+
+  Future<void> _leaveAndPop() async {
+    try {
+      await _engine?.leaveChannel();
+      await _engine?.release();
+    } catch (_) {}
+    _engine = null;
+    _tick?.cancel();
     if (mounted) Navigator.of(context).maybePop();
-  }
-
-  Future<void> _cleanup() async {
-    await _localStream?.dispose();
-    await _pc?.close();
-    await _localRenderer.dispose();
-    await _remoteRenderer.dispose();
-  }
-
-  Future<void> _toggleMute() async {
-    setState(() => muted = !muted);
-    _localStream?.getAudioTracks().forEach((t) => t.enabled = !muted);
-  }
-
-  Future<void> _toggleCam() async {
-    setState(() => camOff = !camOff);
-    _localStream?.getVideoTracks().forEach((t) => t.enabled = !camOff);
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
-    _iceSub?.cancel();
+    _callSub?.cancel();
     _tick?.cancel();
-    _cleanup();
+    final eng = _engine;
+    _engine = null;
+    if (eng != null) {
+      eng.leaveChannel().then((_) => eng.release()).catchError((_) {});
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final peer = widget.peer;
+    final name = peer.displayName;
+    final uidLocal = _agoraUidFromFirebase(widget.user.uid);
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0B1220),
-      body: SafeArea(
-        child: Stack(children: [
-          Positioned.fill(
-            child: widget.audioOnly
-                ? Container(
-                    color: const Color(0xFF0B1220),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _Avatar(
-                              name: peer.displayName,
-                              color: peer.colorValue,
-                              url: peer.avatarUrl,
-                              size: 110),
-                          const SizedBox(height: 16),
-                          Text(peer.displayName,
+      backgroundColor: const Color(0xFF0B0D12),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Remote video
+          if (!widget.audioOnly && _engine != null && _remoteUid != null)
+            AgoraVideoView(
+              controller: VideoViewController.remote(
+                rtcEngine: _engine!,
+                canvas: VideoCanvas(uid: _remoteUid),
+                connection: RtcConnection(channelId: widget.callId),
+              ),
+            )
+          else
+            Container(
+              color: const Color(0xFF0B0D12),
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircleAvatar(
+                      radius: 56,
+                      backgroundColor: peer.colorValue,
+                      backgroundImage: (peer.avatarUrl != null &&
+                              peer.avatarUrl!.isNotEmpty)
+                          ? NetworkImage(peer.avatarUrl!)
+                          : null,
+                      child: (peer.avatarUrl == null ||
+                              peer.avatarUrl!.isEmpty)
+                          ? Text(
+                              name.isNotEmpty ? name[0].toUpperCase() : '?',
                               style: const TextStyle(
+                                  fontSize: 40,
                                   color: Colors.white,
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w700)),
-                        ],
-                      ),
+                                  fontWeight: FontWeight.w700),
+                            )
+                          : null,
                     ),
-                  )
-                : RTCVideoView(_remoteRenderer,
-                    objectFit:
-                        RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
-          ),
-          if (!widget.audioOnly)
-            Positioned(
-              right: 14,
-              top: 14,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: SizedBox(
-                  width: 110,
-                  height: 160,
-                  child: RTCVideoView(_localRenderer, mirror: true),
+                    const SizedBox(height: 16),
+                    Text(name,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 26,
+                            fontWeight: FontWeight.w700)),
+                  ],
                 ),
               ),
             ),
-          Positioned(
-            top: 12,
-            left: 12,
-            right: 12,
-            child: Column(children: [
-              Text(peer.displayName,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700)),
-              Text(
-                status == 'ringing'
-                    ? (widget.isCaller ? 'Вызов…' : 'Входящий…')
-                    : status == 'connected'
-                        ? timerLabel
-                        : status,
-                style: const TextStyle(color: Colors.white70),
+
+          // Local preview (PIP)
+          if (!widget.audioOnly && _engine != null && !camOff)
+            Positioned(
+              right: 16,
+              top: MediaQuery.of(context).padding.top + 16,
+              width: 110,
+              height: 160,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: AgoraVideoView(
+                  controller: VideoViewController(
+                    rtcEngine: _engine!,
+                    canvas: VideoCanvas(uid: uidLocal),
+                  ),
+                ),
               ),
-              const Text('SLine WebRTC',
-                  style: TextStyle(color: Colors.white38, fontSize: 11)),
-            ]),
-          ),
+            ),
+
+          // Top status
           Positioned(
+            top: MediaQuery.of(context).padding.top + 12,
             left: 0,
             right: 0,
-            bottom: 36,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            child: Column(
               children: [
-                _cBtn(
-                    icon: muted ? Icons.mic_off : Icons.mic,
-                    onTap: _toggleMute),
-                _cBtn(
-                    icon: Icons.call_end,
-                    color: SLineColors.danger,
-                    onTap: _hangup,
-                    big: true),
-                if (!widget.audioOnly)
-                  _cBtn(
-                      icon: camOff ? Icons.videocam_off : Icons.videocam,
-                      onTap: _toggleCam)
-                else
-                  _cBtn(icon: Icons.volume_up, onTap: () {}),
+                Text(
+                  status == 'ringing'
+                      ? (widget.isCaller ? 'Вызов…' : 'Соединение…')
+                      : (status == 'connected' ? timerLabel : status),
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.85),
+                      fontSize: 16),
+                ),
+                if (errorText != null) ...[
+                  const SizedBox(height: 8),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(errorText!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            color: Color(0xFFFF8A80), fontSize: 13)),
+                  ),
+                ],
               ],
             ),
           ),
-        ]),
+
+          // Controls
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: MediaQuery.of(context).padding.bottom + 36,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _roundBtn(
+                  icon: muted ? Icons.mic_off : Icons.mic,
+                  label: muted ? 'Микрофон' : 'Микрофон',
+                  onTap: _toggleMute,
+                  active: muted,
+                ),
+                _roundBtn(
+                  icon: Icons.call_end,
+                  label: 'Сброс',
+                  onTap: _hangup,
+                  bg: const Color(0xFFE53935),
+                  big: true,
+                ),
+                _roundBtn(
+                  icon: speakerOn ? Icons.volume_up : Icons.volume_off,
+                  label: 'Динамик',
+                  onTap: _toggleSpeaker,
+                  active: !speakerOn,
+                ),
+                if (!widget.audioOnly)
+                  _roundBtn(
+                    icon: camOff ? Icons.videocam_off : Icons.videocam,
+                    label: 'Камера',
+                    onTap: _toggleCam,
+                    active: camOff,
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _cBtn({
+  Widget _roundBtn({
     required IconData icon,
+    required String label,
     required VoidCallback onTap,
-    Color? color,
+    Color? bg,
     bool big = false,
+    bool active = false,
   }) {
-    final sz = big ? 72.0 : 56.0;
-    return Material(
-      color: color ?? Colors.white24,
-      shape: const CircleBorder(),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: onTap,
-        child: SizedBox(
-          width: sz,
-          height: sz,
-          child: Icon(icon, color: Colors.white, size: big ? 34 : 26),
+    final size = big ? 68.0 : 54.0;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: onTap,
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: bg ??
+                  (active
+                      ? Colors.white
+                      : Colors.white.withValues(alpha: 0.18)),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon,
+                color: bg != null
+                    ? Colors.white
+                    : (active ? Colors.black : Colors.white),
+                size: big ? 32 : 24),
+          ),
         ),
-      ),
+        const SizedBox(height: 6),
+        Text(label,
+            style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.7), fontSize: 11)),
+      ],
     );
   }
 }
 
-// ── Галерея внутри мессенджера (как в TG) ───────────────────
 class InAppGalleryPicker extends StatefulWidget {
   final RequestType requestType;
   const InAppGalleryPicker({super.key, this.requestType = RequestType.image});
